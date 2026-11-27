@@ -5,7 +5,8 @@
 #
 # The APK is debug-signed until KAT Mobile has a release key: the DEBUG_KEYSTORE_BASE64 secret
 # holds one fixed debug keystore (alias androiddebugkey, password android), so that releases can
-# update each other. The workflow refuses to run without it rather than sign with a throwaway key.
+# update each other. The workflow refuses to run without it rather than sign with a throwaway key,
+# and checks that the APK's signer is that keystore's certificate, KEY_SHA256.
 name: Release APK
 
 on:
@@ -22,6 +23,7 @@ permissions:
 
 env:
   NDK_VERSION: 27.2.12479018
+  KEY_SHA256: 4c2bd5530ca2a00c3039769fd19992c5344f95861c7321494deea89d824d6e00
 
 jobs:
   apk:
@@ -56,17 +58,33 @@ jobs:
             echo "::error::The DEBUG_KEYSTORE_BASE64 secret is not set"
             exit 1
           fi
-          mkdir -p ~/.android
-          printf '%s' "$DEBUG_KEYSTORE_BASE64" | base64 -d > ~/.android/debug.keystore
+          printf '%s' "$DEBUG_KEYSTORE_BASE64" | base64 -d > "$RUNNER_TEMP/debug.keystore"
 
+      # AGP's injected signing properties (what Android Studio's "Generate Signed APK" passes) sign
+      # with that keystore. A debug.keystore in ~/.android is not enough: on the runner, AGP
+      # signed with a debug key of its own.
       - name: Build
-        run: ./gradlew --no-daemon -PkatAbis=arm64-v8a assembleRelease
+        run: >-
+          ./gradlew --no-daemon -PkatAbis=arm64-v8a
+          -Pandroid.injected.signing.store.file="$RUNNER_TEMP/debug.keystore"
+          -Pandroid.injected.signing.store.password=android
+          -Pandroid.injected.signing.key.alias=androiddebugkey
+          -Pandroid.injected.signing.key.password=android
+          assembleRelease
 
       - name: Check the APK
         run: |
           apk=app/build/outputs/apk/release/app-release.apk
           tools=$(ls -d "$ANDROID_HOME"/build-tools/* | sort -V | tail -1)
           "$tools/apksigner" verify --print-certs "$apk"
+          signer=$("$tools/apksigner" verify --print-certs "$apk" | sed -n 's/^Signer #1 certificate SHA-256 digest: //p')
+          keystore=$(keytool -list -v -keystore "$RUNNER_TEMP/debug.keystore" -storepass android | sed -n 's/^.*SHA256: //p' | tr -d ':' | tr 'A-F' 'a-f')
+          echo "APK signer: $signer"
+          echo "Keystore:   $keystore"
+          if [ -z "$signer" ] || [ "$signer" != "$keystore" ] || [ "$signer" != "$KEY_SHA256" ]; then
+            echo "::error::The APK is not signed with the release keystore ($KEY_SHA256)"
+            exit 1
+          fi
           "$tools/zipalign" -c -P 16 4 "$apk"
           badging=$("$tools/aapt2" dump badging "$apk")
           echo "$badging" | head -1
