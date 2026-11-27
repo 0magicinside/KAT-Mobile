@@ -77,7 +77,9 @@ jobs:
           apk=app/build/outputs/apk/release/app-release.apk
           tools=$(ls -d "$ANDROID_HOME"/build-tools/* | sort -V | tail -1)
           "$tools/apksigner" verify --print-certs "$apk"
-          signer=$("$tools/apksigner" verify --print-certs "$apk" | sed -n 's/^Signer #1 certificate SHA-256 digest: //p')
+          # "Signer #1 certificate SHA-256 digest: …" or, from newer build-tools, one line per
+          # signature scheme ("V2 Signer: certificate SHA-256 digest: …"): all must be the same.
+          signer=$("$tools/apksigner" verify --print-certs "$apk" | sed -n 's/^.*certificate SHA-256 digest: //p' | sort -u)
           keystore=$(keytool -list -v -keystore "$RUNNER_TEMP/debug.keystore" -storepass android | sed -n 's/^.*SHA256: //p' | tr -d ':' | tr 'A-F' 'a-f')
           echo "APK signer: $signer"
           echo "Keystore:   $keystore"
