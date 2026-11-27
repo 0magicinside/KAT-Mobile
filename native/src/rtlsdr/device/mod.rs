@@ -1,0 +1,177 @@
+// This Source Code Form is subject to the terms of the Mozilla Public
+// License, v. 2.0. If a copy of the MPL was not distributed with this
+// file, You can obtain one at https://mozilla.org/MPL/2.0/.
+
+pub mod constants;
+pub use constants::*;
+
+use std::time::Duration;
+use tracing::{error, info, warn};
+
+use super::error::Result;
+
+/// Low-level USB control transport implemented by Android's `UsbDeviceConnection` (over JNI)
+/// or by a mock transport in host unit tests.
+pub trait UsbTransport: Send + std::fmt::Debug {
+    fn read_control(
+        &self,
+        request_type: u8,
+        request: u8,
+        value: u16,
+        index: u16,
+        buf: &mut [u8],
+        timeout: Duration,
+    ) -> Result<usize>;
+
+    fn write_control(
+        &self,
+        request_type: u8,
+        request: u8,
+        value: u16,
+        index: u16,
+        buf: &[u8],
+        timeout: Duration,
+    ) -> Result<usize>;
+
+    fn reset(&self) -> Result<()> {
+        Ok(())
+    }
+
+    fn usb_strings(&self) -> Result<(Option<String>, Option<String>, Option<String>)> {
+        Ok((None, None, None))
+    }
+}
+
+pub fn is_known_device(vid: u16, pid: u16) -> bool {
+    DEVICE_LOOKUP.contains(&(vid, pid))
+}
+
+#[derive(Debug)]
+pub struct Device {
+    handle: Box<dyn UsbTransport>,
+}
+
+impl Device {
+    pub fn new(handle: Box<dyn UsbTransport>) -> Self {
+        Self { handle }
+    }
+
+    /// librtlsdr's dummy write when it opens a dongle: "perform a dummy write, if it fails, reset
+    /// the device". Any failure resets it and continues, matching upstream KAT's rtl-sdr-rs.
+    pub fn test_write(&mut self) -> Result<()> {
+        match self.write_reg(BLOCK_USB, USB_SYSCTL, 0x09, 1) {
+            Ok(len) if len > 0 => return Ok(()),
+            Ok(_) => info!("Resetting device..."),
+            Err(e) => warn!("The dummy write failed ({}): resetting the device", e),
+        }
+        if let Err(e) = self.handle.reset() {
+            warn!("Resetting the device failed: {}", e);
+        }
+        Ok(())
+    }
+
+    pub fn reset_demod(&self) -> Result<()> {
+        self.demod_write_reg(1, 0x01, 0x14, 1)?;
+        self.demod_write_reg(1, 0x01, 0x10, 1)?;
+        Ok(())
+    }
+
+    pub fn read_reg(&self, block: u16, addr: u16, len: usize) -> Result<u16> {
+        assert!(len == 1 || len == 2);
+        let mut data: [u8; 2] = [0, 0];
+        let index: u16 = block << 8;
+        self.handle
+            .read_control(CTRL_IN, 0, addr, index, &mut data[..len], CTRL_TIMEOUT)?;
+        // Read registers as little endian, but write as big.
+        Ok(u16::from_le_bytes(data))
+    }
+
+    pub fn write_reg(&self, block: u16, addr: u16, val: u16, len: usize) -> Result<usize> {
+        assert!(len == 1 || len == 2);
+        let data: [u8; 2] = val.to_be_bytes();
+        let data_slice = if len == 1 { &data[1..2] } else { &data };
+        let index = (block << 8) | 0x10;
+        self.handle
+            .write_control(CTRL_OUT, 0, addr, index, data_slice, CTRL_TIMEOUT)
+    }
+
+    /// Only supports u8 reads.
+    pub fn demod_read_reg(&self, page: u16, addr: u16) -> Result<u16> {
+        let mut data = [0_u8];
+        let index = page;
+        if let Err(e) = self.handle.read_control(
+            CTRL_IN,
+            0,
+            (addr << 8) | 0x20,
+            index,
+            &mut data,
+            CTRL_TIMEOUT,
+        ) {
+            error!(
+                "demod_read_reg failed: {} page: {:#02x} addr: {:#02x}",
+                e, page, addr
+            );
+            return Err(e);
+        }
+        Ok(data[0] as u16)
+    }
+
+    pub fn demod_write_reg(&self, page: u16, mut addr: u16, val: u16, len: usize) -> Result<usize> {
+        assert!(len == 1 || len == 2);
+        let index = 0x10 | page;
+        addr = (addr << 8) | 0x20;
+        let data: [u8; 2] = val.to_be_bytes();
+        let data_slice = if len == 1 { &data[1..2] } else { &data };
+
+        let bytes = match self
+            .handle
+            .write_control(CTRL_OUT, 0, addr, index, data_slice, CTRL_TIMEOUT)
+        {
+            Ok(n) => n,
+            Err(e) => {
+                error!(
+                    "demod_write_reg failed: {} page: {:#02x} addr: {:#02x} val: {:#02x}",
+                    e, page, addr, val
+                );
+                return Err(e);
+            }
+        };
+
+        self.demod_read_reg(0x0a, 0x1)?;
+
+        Ok(bytes)
+    }
+
+    pub fn read_eeprom(&self, data: &mut [u8], offset: u8, len: usize) -> Result<usize> {
+        assert!((len + offset as usize) <= EEPROM_SIZE);
+        self.write_array(BLOCK_IIC, EEPROM_ADDR, &[offset], 1)?;
+        for byte in data.iter_mut().take(len) {
+            self.read_array(BLOCK_IIC, EEPROM_ADDR, std::slice::from_mut(byte), 1)?;
+        }
+        Ok(len)
+    }
+
+    pub fn usb_strings(&self) -> Result<(Option<String>, Option<String>, Option<String>)> {
+        self.handle.usb_strings()
+    }
+
+    pub fn i2c_write(&self, i2c_addr: u16, buffer: &[u8]) -> Result<usize> {
+        self.write_array(BLOCK_IIC, i2c_addr, buffer, buffer.len())
+    }
+
+    pub fn i2c_read(&self, i2c_addr: u16, buffer: &mut [u8], len: u8) -> Result<usize> {
+        self.read_array(BLOCK_IIC, i2c_addr, buffer, len)
+    }
+
+    pub fn read_array(&self, block: u16, addr: u16, arr: &mut [u8], len: u8) -> Result<usize> {
+        let index: u16 = block << 8;
+        self.handle
+            .read_control(CTRL_IN, 0, addr, index, &mut arr[..len as usize], CTRL_TIMEOUT)
+    }
+
+    pub fn write_array(&self, block: u16, addr: u16, arr: &[u8], len: usize) -> Result<usize> {
+        let index: u16 = (block << 8) | 0x10;
+        self.handle
+            .write_control(CTRL_OUT, 0, addr, index, &arr[..len], CTRL_TIMEOUT)
+    }
+}

@@ -65,3 +65,32 @@ fn princeton_iq(offset:f64,noise:f64)->Vec<u8>{
     let symbols:Vec<_>=fm.pulses.iter().map(|p|p.abs()).filter(|d|*d<3000).collect();
     assert!(symbols.iter().filter(|d|(**d-400).abs()<=24).count()*100/symbols.len()>=95,"FSK timings: {symbols:?}");
 }
+
+#[test]fn cu8_rtlsdr_stream_with_leading_zero_bytes_and_offset_tuning_decodes_princeton(){
+    let cs8=princeton_iq(225_000.0,6.0);
+    let mut cu8=vec![0u8;20_000]; // RTL-SDR dead startup zero bytes (~5 ms at 2 MS/s)
+    cu8.extend(cs8.into_iter().map(|b|((b as i8 as i16)+128).clamp(0,255) as u8));
+    let mut rx=ReceiveSession::with_format(2_000_000,433_920_000,250_000.0,kat_rx::IqFormat::Cu8);
+    let mut bursts=Vec::new();
+    for c in cu8.chunks(16384){bursts.extend(rx.process(c).bursts)}
+    bursts.extend(rx.flush().bursts);
+    assert!(bursts.iter().any(|b|b.modulation=="AM"&&(b.offset_hz+25_000.0).abs()<2000.0&&kat_rx::identify_receive(&b.pulses,433_920_000,false).unwrap().iter().any(|r|r.name=="Princeton")));
+}
+
+#[test]fn cu8_rtlsdr_fsk_slicer_tracks_both_tones(){
+    let mut cu8=Vec::new();let mut phase:f64=0.0;let mut rng=29u32;
+    for n in 0..300000usize{
+        let on=(60000..140000).contains(&n);
+        let tone=if (n.saturating_sub(60000)/800)%2==0{30000.0}else{-30000.0};
+        phase+=TAU*(150000.0+tone)/2_000_000.0;
+        for v in [phase.cos(),phase.sin()]{rng=rng.wrapping_mul(1664525).wrapping_add(1013904223);let noise=((rng>>8) as f64/16777216.0-0.5)*8.0;let sample=(127.5+noise+if on{v*65.0}else{0.0}).round().clamp(0.0,255.0) as u8;cu8.push(sample);}
+    }
+    let mut rx=ReceiveSession::with_format(2_000_000,433_920_000,0.0,kat_rx::IqFormat::Cu8);
+    let mut bursts=Vec::new();
+    for c in cu8.chunks(32768){bursts.extend(rx.process(c).bursts)}
+    bursts.extend(rx.flush().bursts);
+    let fm=bursts.iter().find(|b|b.modulation=="FM").expect("No CU8 FM burst");
+    assert!(fm.pulses.len()>=90);
+    let symbols:Vec<_>=fm.pulses.iter().map(|p|p.abs()).filter(|d|*d<3000).collect();
+    assert!(symbols.iter().filter(|d|(**d-400).abs()<=24).count()*100/symbols.len()>=95,"CU8 FSK timings: {symbols:?}");
+}

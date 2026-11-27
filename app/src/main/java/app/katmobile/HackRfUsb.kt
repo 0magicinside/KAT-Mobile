@@ -5,7 +5,9 @@ import java.nio.ByteBuffer
 import java.util.concurrent.atomic.AtomicBoolean
 
 /** The published HackRF vendor protocol: receiving (bulk IN 0x81) and transmitting (bulk OUT 0x02). */
-class HackRfUsb(private val manager:UsbManager,private val device:UsbDevice):AutoCloseable {
+class HackRfUsb(private val manager:UsbManager,private val device:UsbDevice):SdrUsb {
+    override val kind=RadioKind.HACKRF
+    override val iqFormat=IqFormat.CS8
     private val iface=(0 until device.interfaceCount).map(device::getInterface).firstOrNull{i->(0 until i.endpointCount).any{i.getEndpoint(it).address==0x81}}?:error("No HackRF RX interface")
     private val endpoint=(0 until iface.endpointCount).map(iface::getEndpoint).first{it.address==0x81&&it.type==UsbConstants.USB_ENDPOINT_XFER_BULK}
     private val txEndpoint=(0 until iface.endpointCount).map(iface::getEndpoint).firstOrNull{it.address==0x02&&it.type==UsbConstants.USB_ENDPOINT_XFER_BULK}
@@ -13,7 +15,7 @@ class HackRfUsb(private val manager:UsbManager,private val device:UsbDevice):Aut
     private val stopped=AtomicBoolean(false)
     private val queued=ArrayList<UsbRequest>()
     @Volatile private var tuneGeneration=0L
-    val description:String
+    override val description:String
     init {
         try{
             check(connection.claimInterface(iface,true)){"The USB interface is busy"}
@@ -22,15 +24,16 @@ class HackRfUsb(private val manager:UsbManager,private val device:UsbDevice):Aut
             description=String(version,0,n).trimEnd('\u0000')
         }catch(e:Exception){connection.close();throw e}
     }
+    override fun sampleRate(s:RadioSettings):Int=s.sampleRate
     @Synchronized fun control(c:Control){
         check(!stopped.get()){"The USB connection is closed"}
         val result=connection.controlTransfer(if(c.input)0xC0 else 0x40,c.request,c.value,c.index,c.data,c.data.size,1000)
         check(result==c.data.size&&(!c.input||c.request !in listOf(19,20,21)||c.data[0].toInt()!=0)){"HackRF request ${c.request} rejected ($result)"}
     }
-    fun configure(s:RadioSettings,center:Long=s.frequency){Wire.configuration(s).map{if(it.request==16)Wire.frequency(center)else it}.forEach(::control)}
-    fun tune(hz:Long){control(Wire.frequency(hz));tuneGeneration++}
-    fun isCurrentGeneration(generation:Long)=generation==tuneGeneration
-    fun read(hopping:Boolean=false,consume:(ByteArray,Int,Long)->Unit){
+    override fun configure(s:RadioSettings,center:Long){Wire.configuration(s).map{if(it.request==16)Wire.frequency(center)else it}.forEach(::control)}
+    override fun tune(hz:Long){control(Wire.frequency(hz));tuneGeneration++}
+    override fun isCurrentGeneration(generation:Long)=generation==tuneGeneration
+    override fun read(hopping:Boolean,consume:(ByteArray,Int,Long)->Unit){
         val buffers=ArrayList<ByteBuffer>()
         // Short queues keep a hop from spending its dwell on old-frequency samples.
         val capacity=if(!hopping&&android.os.Build.VERSION.SDK_INT>=28)262144 else 16384
@@ -58,7 +61,7 @@ class HackRfUsb(private val manager:UsbManager,private val device:UsbDevice):Aut
         val pipe=OutPipe(connection,out)
         try{HackRfTx(::control,pipe).send(iq,carrierHz,vgaGain,amp,cancelled)}finally{pipe.close()}
     }
-    fun stop(){if(stopped.compareAndSet(false,true)){runCatching{connection.controlTransfer(0x40,1,0,0,null,0,500)};connection.close()}}
+    override fun stop(){if(stopped.compareAndSet(false,true)){runCatching{connection.controlTransfer(0x40,1,0,0,null,0,500)};connection.close()}}
     override fun close(){stop()}
 
     /** The bulk OUT endpoint with [DEPTH] transfers in flight (libhackrf keeps 4), so the HackRF never waits for the next one. */

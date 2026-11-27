@@ -149,4 +149,46 @@ class CoreTest {
         assertEquals(c,c.withDecode(""))
     }
     @Test fun iniImportOnlyAppliesReceptionAndHistoryPreferences(){val s=StateFormat.ini("[radio]\ndefault_frequency=315000000\ndefault_lna_gain=40\ndefault_vga_gain=40\n[general]\nmax_captures=0\nignore_duplicates=false\nautobf=true",RadioSettings());assertEquals(315_000_000,s.frequency);assertEquals(40,s.lna);assertEquals(2000,s.maxCaptures);assertFalse(s.ignoreDuplicates)}
+
+    @Test fun sdrDeviceClassificationMatchesHackRfAndRtlSdrVidPids(){
+        assertEquals(RadioKind.HACKRF,SdrDevices.kindOf(0x1d50,0x6089))
+        assertEquals(RadioKind.HACKRF,SdrDevices.kindOf(0x1d50,0x604b))
+        assertEquals(RadioKind.HACKRF,SdrDevices.kindOf(0x1d50,0xcc15))
+        assertEquals(RadioKind.RTLSDR,SdrDevices.kindOf(0x0bda,0x2832))
+        assertEquals(RadioKind.RTLSDR,SdrDevices.kindOf(0x0bda,0x2838))
+        assertEquals(RadioKind.RTLSDR,SdrDevices.kindOf(0x1f4d,0xd803))
+        assertNull(SdrDevices.kindOf(0x1234,0x5678))
+        assertEquals(42,SdrDevices.RTL_SDR_IDS.size)
+        assertTrue(RadioKind.HACKRF.supportsTx)
+        assertFalse(RadioKind.RTLSDR.supportsTx)
+    }
+    @Test fun fftFindsSyntheticCarrierInUnsignedCu8Samples(){
+        val n=1024;val bytes=ByteArray(n*2)
+        repeat(n){val phase=2*PI*32*it/n;bytes[it*2]=(127.5+cos(phase)*100).roundToInt().coerceIn(0,255).toByte();bytes[it*2+1]=(127.5+sin(phase)*100).roundToInt().coerceIn(0,255).toByte()}
+        val bins=Spectrum.fft(bytes,bytes.size,unsigned=true)
+        assertEquals(256,bins.size)
+        assertTrue(abs(bins.indices.maxBy{bins[it]}-136)<=1)
+        assertTrue(bins.max()>-10f)
+        // Silent CU8 centered at 128 has near-zero power instead of a full-scale DC spike.
+        val quiet=ByteArray(n*2){128.toByte()}
+        val quietBins=Spectrum.fft(quiet,quiet.size,unsigned=true)
+        assertTrue("Quiet CU8 spectrum max was ${quietBins.max()}",quietBins.max()<-40f)
+    }
+    @Test fun rtlSdrSettingsValidateAndMigrateCleanlyFromOldSessions(){
+        val migrated=StateFormat.decode("""{"settings":{"frequency":433920000},"captures":[]}""")
+        assertEquals(2_000_000,migrated.settings.rtlSampleRate)
+        assertTrue(migrated.settings.rtlAutoGain)
+        assertEquals(402,migrated.settings.rtlGainTenthsDb)
+        assertEquals(0,migrated.settings.rtlPpm)
+        assertFalse(migrated.settings.rtlBiasTee)
+        assertTrue(runCatching{RadioSettings(rtlSampleRate=8_000_000).validate()}.isFailure)
+        assertTrue(runCatching{RadioSettings(rtlGainTenthsDb=123).validate()}.isFailure)
+        assertTrue(runCatching{RadioSettings(rtlPpm=150).validate()}.isFailure)
+        assertTrue(runCatching{RadioSettings(rtlSampleRate=2_400_000,rtlAutoGain=false,rtlGainTenthsDb=496,rtlPpm=-15,rtlBiasTee=true).validate()}.isSuccess)
+        assertEquals("Auto (AGC)",RtlSdrUsb.gainLabel(true,402))
+        assertEquals("40.2 dB",RtlSdrUsb.gainLabel(false,402))
+        assertEquals(16000,RtlSdrUsb.retuneFlushBytes(2_000_000))
+        val cu8Spec=StateFormat.iqSpec("kat_433670000Hz_2000000sps_rx433920000Hz_1794365554491.cu8",RadioSettings())
+        assertEquals(2_000_000,cu8Spec.rate);assertEquals(433_670_000,cu8Spec.center);assertEquals(433_920_000,cu8Spec.target);assertEquals(250_000.0,cu8Spec.offsetHz,0.0)
+    }
 }

@@ -18,7 +18,10 @@ data class RadioSettings(
     val autosave:Boolean=true, val includeRaw:Boolean=true, val recordingQuotaMb:Int=1024,
     val fontSize:Int=13, val keepScreen:Boolean=true,
     /** TX power, desktop KAT's `tx_vga_gain` / `tx_amp` (its default: full power). */
-    val txVga:Int=47, val txAmp:Boolean=true
+    val txVga:Int=47, val txAmp:Boolean=true,
+    /** RTL-SDR receive-only settings (2.0 MS/s matches desktop KAT; gain in tenths of dB). */
+    val rtlSampleRate:Int=2_000_000, val rtlAutoGain:Boolean=true,
+    val rtlGainTenthsDb:Int=402, val rtlPpm:Int=0, val rtlBiasTee:Boolean=false
 ) {
     fun frequencies()=hopFrequencies.split(',').filter{it.isNotBlank()}.map{mhz(it)}.also{require(it.size in 1..32)}
     fun validate(){
@@ -31,6 +34,9 @@ data class RadioSettings(
         require(thresholdDb in 3..40&&minimumPulseUs in 4..1000&&burstGapUs in 1000..200000)
         require(maxCaptures in 10..2000&&recordingQuotaMb in 100..100000&&fontSize in 10..22)
         require(txVga in 0..47){"TX gain: 0–47 dB"}
+        require(rtlSampleRate in RtlSdrUsb.SAMPLE_RATES){"Unsupported RTL-SDR sample rate"}
+        require(rtlGainTenthsDb in RtlSdrUsb.R82XX_GAINS_TENTHS_DB){"Unsupported RTL-SDR tuner gain"}
+        require(rtlPpm in -100..100){"RTL-SDR PPM correction must be −100 to 100"}
     }
     companion object {fun mhz(s:String):Long=s.trim().replace(',','.').toBigDecimal().multiply(1_000_000.toBigDecimal()).longValueExact().also{require(it in 1_000_000L..6_000_000_000L)}}
 }
@@ -59,7 +65,8 @@ fun txPowerLabel(gain:Int,amp:Boolean)="$gain dB"+if(amp)" + amp" else ""
 data class Saved(val settings:RadioSettings=RadioSettings(),val captures:List<Capture> = emptyList())
 data class IqSpec(val rate:Int,val center:Long,val target:Long){val offsetHz get()=(target-center).toDouble()}
 data class RadioStatus(val running:Boolean=false,val device:String="No device",val firmware:String="",
-    val message:String="Connect HackRF using USB OTG",val frequency:Long=433_920_000,
+    val radioKind:RadioKind?=null,val activeSampleRate:Int=2_000_000,
+    val message:String="Connect HackRF or RTL-SDR using USB OTG",val frequency:Long=433_920_000,
     val hopIndex:Int=0,val hopTotal:Int=0,val hopSwitches:Long=0,
     val bytes:Long=0,val bytesPerSecond:Long=0,val gaps:Long=0,val powerDb:Float=-100f,
     val spectrum:List<Float> = emptyList(),val recording:String="",val recordingBytes:Long=0,val transmitting:Boolean=false)

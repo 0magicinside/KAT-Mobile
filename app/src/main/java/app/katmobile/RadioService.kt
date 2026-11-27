@@ -15,7 +15,10 @@ class RadioService:Service() {
     private var txJob:Job?=null
     /** Receiving stopped for a transmission and starts again after it: the receiver's end does not stop the service. */
     @Volatile private var pausedForTx=false
-    @Volatile private var radio:HackRfUsb?=null
+    @Volatile private var radio:SdrUsb?=null
+    @Volatile private var activeDeviceName=""
+    @Volatile private var activeIqFormat=IqFormat.CS8
+    @Volatile private var activeSampleRate=2_000_000
     private var wake:PowerManager.WakeLock?=null
     private val fileLock=Any()
     private var recording:BufferedOutputStream?=null
@@ -30,7 +33,9 @@ class RadioService:Service() {
         val action=intent?.action
         if(action=="START"||action=="TX"){
             val manager=getSystemService(UsbManager::class.java)
-            val device=manager.deviceList.values.firstOrNull{it.deviceName==intent.getStringExtra("device")&&HackRfUsb.supported(it)}
+            val device=manager.deviceList.values.firstOrNull{
+                it.deviceName==intent.getStringExtra("device")&&if(action=="TX")HackRfUsb.supported(it)else SdrDevices.supported(it)
+            }
             if(device==null||!manager.hasPermission(device)){Hub.notice.value="The USB device is no longer available";if(action=="TX")Hub.pendingTx.set(null);stopIfIdle();return START_NOT_STICKY}
             try{startForeground(8,notification())}catch(e:Exception){Hub.notice.value=e.message?:"Reception did not start";if(action=="TX")Hub.pendingTx.set(null);stopIfIdle();return START_NOT_STICKY}
         }else if(!busy()){stopSelf();return START_NOT_STICKY}
@@ -50,6 +55,7 @@ class RadioService:Service() {
         if(txJob?.isActive==true){Hub.notice.value="A transmission is already on air";return}
         if(recording!=null){Hub.notice.value="Stop the IQ recording before transmitting";stopIfIdle();return}
         val receiving=job?.isActive==true
+        val resumeDevice=activeDeviceName.ifBlank{name}
         txJob=scope.launch{
             Hub.status.update{it.copy(transmitting=true,message="Transmitting ${request.what}…")}
             Hub.txMessage.value="Transmitting ${request.what}…"
@@ -71,35 +77,45 @@ class RadioService:Service() {
             }finally{
                 pausedForTx=false
                 Hub.status.update{it.copy(transmitting=false,message=Hub.txMessage.value)}
-                if(resume&&scope.isActive)startReceiver(name) else if(job?.isActive!=true)stopSelf()
+                if(resume&&scope.isActive)startReceiver(resumeDevice) else if(job?.isActive!=true)stopSelf()
             }
         }
     }
     private fun notification():Notification {
         val open=PendingIntent.getActivity(this,0,Intent(this,MainActivity::class.java),PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT)
         val stop=PendingIntent.getService(this,1,Intent(this,RadioService::class.java).setAction("STOP"),PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT)
-        return Notification.Builder(this,"radio").setSmallIcon(R.drawable.ic_radio).setContentTitle("KAT Mobile · RX")
-            .setContentText("${"%.3f".format(Hub.status.value.frequency/1e6)} MHz · USB reception")
+        val label=Hub.status.value.radioKind?.label?:"USB"
+        return Notification.Builder(this,"radio").setSmallIcon(R.drawable.ic_radio).setContentTitle("KAT Mobile · RX ($label)")
+            .setContentText("${"%.3f".format(Hub.status.value.frequency/1e6)} MHz · $label reception")
             .setContentIntent(open).setOngoing(true).addAction(Notification.Action.Builder(null,"Stop",stop).build()).build()
     }
     private fun startReceiver(name:String){
         val manager=getSystemService(UsbManager::class.java)
-        val device=manager.deviceList.values.firstOrNull{it.deviceName==name&&HackRfUsb.supported(it)}
-        if(device==null||!manager.hasPermission(device)){Hub.notice.value="HackRF is unavailable or USB permission is missing";stopSelf();return}
+        val device=manager.deviceList.values.firstOrNull{it.deviceName==name&&SdrDevices.supported(it)}
+        val kind=device?.let(SdrDevices::kindOf)
+        if(device==null||kind==null||!manager.hasPermission(device)){Hub.notice.value="USB SDR device is unavailable or permission is missing";stopSelf();return}
         val s=Hub.settings.value
-        Hub.status.value=RadioStatus(running=true,device=device.productName?:"HackRF",frequency=s.frequency,message="Opening USB reception…")
+        val rate=if(kind==RadioKind.RTLSDR)s.rtlSampleRate else s.sampleRate
+        activeDeviceName=device.deviceName
+        activeSampleRate=rate
+        activeIqFormat=if(kind==RadioKind.RTLSDR)IqFormat.CU8 else IqFormat.CS8
+        Hub.status.value=RadioStatus(running=true,device=SdrDevices.displayName(device),radioKind=kind,activeSampleRate=rate,frequency=s.frequency,message="Opening ${kind.label} USB reception…")
         wake=getSystemService(PowerManager::class.java).newWakeLock(PowerManager.PARTIAL_WAKE_LOCK,"KAT:rx").apply{acquire(24*60*60*1000L)}
         job=scope.launch {
             var engine:ReceivePipeline?=null
             try{
-                HackRfUsb(manager,device).use{usb->
+                SdrDevices.open(manager,device).use{usb->
                     radio=usb
+                    val usbRate=usb.sampleRate(s)
+                    val iqFormat=usb.iqFormat
+                    activeSampleRate=usbRate
+                    activeIqFormat=iqFormat
                     val hopFrequencies=if(s.hopping)s.frequencies()else emptyList()
                     lastFrequency=hopFrequencies.firstOrNull()?:s.frequency
-                    val center=Wire.liveCenter(lastFrequency,s.sampleRate);usb.configure(s,center)
-                    engine=ReceivePipeline(s.copy(frequency=lastFrequency),(lastFrequency-center).toDouble(),Hub::add)
-                    Hub.status.value=Hub.status.value.copy(firmware=usb.description,frequency=lastFrequency,hopIndex=if(s.hopping)1 else 0,hopTotal=hopFrequencies.size,hopSwitches=0,message="Reception is active")
-                    Hub.log("USB RX opened · ${usb.description} · ${s.sampleRate} S/s · KAT LO $center Hz")
+                    val center=Wire.liveCenter(lastFrequency,usbRate);usb.configure(s,center)
+                    engine=ReceivePipeline(s.copy(sampleRate=usbRate,frequency=lastFrequency),(lastFrequency-center).toDouble(),iqFormat,usb.kind.label,Hub::add)
+                    Hub.status.value=Hub.status.value.copy(radioKind=usb.kind,activeSampleRate=usbRate,firmware=usb.description,frequency=lastFrequency,hopIndex=if(s.hopping)1 else 0,hopTotal=hopFrequencies.size,hopSwitches=0,message="Reception is active")
+                    Hub.log("${usb.kind.label} USB RX opened · ${usb.description} · $usbRate S/s · ${iqFormat.label} · KAT LO $center Hz")
                     bytes=0L;var intervalBytes=0L;var refresh=SystemClock.elapsedRealtime()
                     val pendingFrequency=java.util.concurrent.atomic.AtomicReference<Long?>(null)
                     val switching=java.util.concurrent.atomic.AtomicBoolean(false)
@@ -111,7 +127,7 @@ class RadioService:Service() {
                                 switching.set(true)
                                 try{
                                     val nextFrequency=hop.frequency
-                                    val nextCenter=Wire.liveCenter(nextFrequency,s.sampleRate)
+                                    val nextCenter=Wire.liveCenter(nextFrequency,usbRate)
                                     // The hardware timer does not wait for IQ or a detected signal.
                                     usb.tune(nextCenter)
                                     pendingFrequency.set(nextFrequency)
@@ -127,8 +143,8 @@ class RadioService:Service() {
                                     // Only this RX thread owns the decoder; the timer never waits for it.
                                     engine!!.flush()
                                     lastFrequency=target
-                                    val targetCenter=Wire.liveCenter(target,s.sampleRate)
-                                    engine=ReceivePipeline(s.copy(frequency=target),(target-targetCenter).toDouble(),Hub::add)
+                                    val targetCenter=Wire.liveCenter(target,usbRate)
+                                    engine=ReceivePipeline(s.copy(sampleRate=usbRate,frequency=target),(target-targetCenter).toDouble(),iqFormat,usb.kind.label,Hub::add)
                                 }
                                 if(switching.get()||!usb.isCurrentGeneration(generation))return@receive
                                 bytes+=n;intervalBytes+=n
@@ -139,10 +155,10 @@ class RadioService:Service() {
                                     engine!!.process(chunk,n)
                                     val now=SystemClock.elapsedRealtime()
                                     if(now-refresh>=200){
-                                        val rate=intervalBytes*1000/(now-refresh).coerceAtLeast(1)
+                                        val rateBps=intervalBytes*1000/(now-refresh).coerceAtLeast(1)
                                         // Hop owns frequency/status fields, so an in-flight block cannot overwrite them.
-                                        val power=engine!!.powerDb;val spectrum=Spectrum.fft(chunk,n)
-                                        Hub.status.update{it.copy(bytes=bytes,bytesPerSecond=rate,
+                                        val power=engine!!.powerDb;val spectrum=Spectrum.fft(chunk,n,iqFormat.unsigned)
+                                        Hub.status.update{it.copy(bytes=bytes,bytesPerSecond=rateBps,
                                             powerDb=power,spectrum=spectrum,recording=recordFile?.name.orEmpty(),recordingBytes=recorded)}
                                         refresh=now;intervalBytes=0
                                     }
@@ -167,12 +183,14 @@ class RadioService:Service() {
             check(dir.usableSpace>100L*1024*1024){"Not enough storage"}
             check(dir.listFiles().orEmpty().sumOf{it.length()}<s.recordingQuotaMb*1024L*1024L){"IQ quota reached; delete or export old recordings"}
             recordLimit=s.recordingQuotaMb*1024L*1024L-dir.listFiles().orEmpty().sumOf{it.length()}
-            val center=Wire.liveCenter(lastFrequency,s.sampleRate)
-            val file=File(dir,"kat_${center}Hz_${s.sampleRate}sps_rx${lastFrequency}Hz_${System.currentTimeMillis()}.cs8")
+            val iq=activeIqFormat
+            val rate=activeSampleRate
+            val center=Wire.liveCenter(lastFrequency,rate)
+            val file=File(dir,"kat_${center}Hz_${rate}sps_rx${lastFrequency}Hz_${System.currentTimeMillis()}.${iq.extension}")
             recorded=0;recordFile=file;recording=file.outputStream().buffered(256*1024)
-            val metadata=StateFormat.gson.toJsonTree(s).asJsonObject.apply{addProperty("center_frequency",center);addProperty("target_frequency",lastFrequency);addProperty("input_offset_hz",lastFrequency-center);addProperty("iq_format","CS8")}
+            val metadata=StateFormat.gson.toJsonTree(s).asJsonObject.apply{addProperty("center_frequency",center);addProperty("target_frequency",lastFrequency);addProperty("sample_rate",rate);addProperty("input_offset_hz",lastFrequency-center);addProperty("iq_format",iq.label)}
             File(dir,file.name+".json").writeText(StateFormat.gson.toJson(metadata))
-            Hub.status.value=Hub.status.value.copy(recording=file.name);Hub.log("IQ recording: ${file.name}")
+            Hub.status.value=Hub.status.value.copy(recording=file.name);Hub.log("IQ recording (${iq.label}): ${file.name}")
         }}catch(e:Exception){Hub.notice.value=e.message?:"Recording did not start"}
     }
     private fun closeRecording(){synchronized(fileLock){runCatching{recording?.close()};if(recordFile!=null)Hub.log("IQ recording complete · $recorded bytes");recording=null;recordFile=null;Hub.status.value=Hub.status.value.copy(recording="")}}
