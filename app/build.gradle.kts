@@ -6,6 +6,14 @@ plugins {
     id("org.jetbrains.kotlin.plugin.compose")
 }
 
+// KAT Mobile's version follows KAT's. The version code is major * 10000 + minor * 100 + patch
+// (1.30.0 is 13000; 0.8.0 was 9).
+val katMobileVersion = "1.30.0"
+// The KAT release the receive core comes from: native/Cargo.toml's package version.
+val katCoreVersion = Regex("""(?m)^version\s*=\s*"([^"]+)"""")
+    .find(rootProject.file("native/Cargo.toml").readText())?.groupValues?.get(1)
+    ?: throw GradleException("native/Cargo.toml has no package version")
+
 android {
     namespace = "app.katmobile"
     compileSdk = 36
@@ -15,8 +23,9 @@ android {
         applicationId = "io.karazajac.katmobile"
         minSdk = 26
         targetSdk = 35
-        versionCode = 9
-        versionName = "0.8.0"
+        versionName = katMobileVersion
+        versionCode = katMobileVersion.split('.').map(String::toInt).let { (major, minor, patch) -> major * 10000 + minor * 100 + patch }
+        buildConfigField("String", "KAT_CORE", "\"$katCoreVersion\"")
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
     buildTypes {

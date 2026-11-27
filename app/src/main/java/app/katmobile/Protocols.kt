@@ -2,9 +2,10 @@ package app.katmobile
 
 import kotlin.math.abs
 
-data class Recognition(val name:String,val bits:Int,val evidence:String)
+/** A burst's protocol(s); [decode] is KAT's decode of the first (JSON), "" from the Kotlin fallbacks below. */
+data class Recognition(val name:String,val bits:Int,val evidence:String,val decode:String="")
 
-/** Passive, non-cryptographic format recognition. It never generates a transmission. */
+/** KAT's receive core first, then a few fixed-code and sensor formats it does not list (no decode, Replay only). */
 class ProtocolRecognizer {
     private data class Candidate(val name:String,val bits:String,val repeats:Int,val evidence:String)
     private data class Seen(var count:Int,var at:Long)

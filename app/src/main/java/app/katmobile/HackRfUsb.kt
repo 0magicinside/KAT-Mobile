@@ -4,10 +4,11 @@ import android.hardware.usb.*
 import java.nio.ByteBuffer
 import java.util.concurrent.atomic.AtomicBoolean
 
-/** Receive-only implementation of the published HackRF vendor protocol. */
+/** The published HackRF vendor protocol: receiving (bulk IN 0x81) and transmitting (bulk OUT 0x02). */
 class HackRfUsb(private val manager:UsbManager,private val device:UsbDevice):AutoCloseable {
     private val iface=(0 until device.interfaceCount).map(device::getInterface).firstOrNull{i->(0 until i.endpointCount).any{i.getEndpoint(it).address==0x81}}?:error("No HackRF RX interface")
     private val endpoint=(0 until iface.endpointCount).map(iface::getEndpoint).first{it.address==0x81&&it.type==UsbConstants.USB_ENDPOINT_XFER_BULK}
+    private val txEndpoint=(0 until iface.endpointCount).map(iface::getEndpoint).firstOrNull{it.address==0x02&&it.type==UsbConstants.USB_ENDPOINT_XFER_BULK}
     private val connection=manager.openDevice(device)?:error("Android could not open the USB device")
     private val stopped=AtomicBoolean(false)
     private val queued=ArrayList<UsbRequest>()
@@ -24,7 +25,7 @@ class HackRfUsb(private val manager:UsbManager,private val device:UsbDevice):Aut
     @Synchronized fun control(c:Control){
         check(!stopped.get()){"The USB connection is closed"}
         val result=connection.controlTransfer(if(c.input)0xC0 else 0x40,c.request,c.value,c.index,c.data,c.data.size,1000)
-        check(result==c.data.size&&(!c.input||c.request !in listOf(19,20)||c.data[0].toInt()!=0)){"HackRF request ${c.request} rejected ($result)"}
+        check(result==c.data.size&&(!c.input||c.request !in listOf(19,20,21)||c.data[0].toInt()!=0)){"HackRF request ${c.request} rejected ($result)"}
     }
     fun configure(s:RadioSettings,center:Long=s.frequency){Wire.configuration(s).map{if(it.request==16)Wire.frequency(center)else it}.forEach(::control)}
     fun tune(hz:Long){control(Wire.frequency(hz));tuneGeneration++}
@@ -50,8 +51,39 @@ class HackRfUsb(private val manager:UsbManager,private val device:UsbDevice):Aut
             queued.forEach{runCatching{it.cancel()};runCatching{it.close()}};queued.clear()
         }
     }
+    /** Send [iq] (KAT's core: 2 MS/s, the waveform 500 kHz above the LO) on [carrierHz]. Receiving must be stopped. */
+    fun transmit(iq:ByteArray,carrierHz:Long,vgaGain:Int,amp:Boolean,cancelled:()->Boolean={false}){
+        check(!stopped.get()){"The USB connection is closed"}
+        val out=txEndpoint?:error("This HackRF has no transmit endpoint")
+        val pipe=OutPipe(connection,out)
+        try{HackRfTx(::control,pipe).send(iq,carrierHz,vgaGain,amp,cancelled)}finally{pipe.close()}
+    }
     fun stop(){if(stopped.compareAndSet(false,true)){runCatching{connection.controlTransfer(0x40,1,0,0,null,0,500)};connection.close()}}
     override fun close(){stop()}
+
+    /** The bulk OUT endpoint with [DEPTH] transfers in flight (libhackrf keeps 4), so the HackRF never waits for the next one. */
+    private class OutPipe(private val connection:UsbDeviceConnection,endpoint:UsbEndpoint):TxSink {
+        private val requests=List(DEPTH){UsbRequest().also{check(it.initialize(connection,endpoint)){"Could not open the USB TX queue"};it.clientData=ByteBuffer.allocateDirect(HackRfTx.CHUNK)}}
+        private val idle=ArrayDeque(requests)
+        private var busy=0
+        override val capacity=DEPTH*HackRfTx.CHUNK
+        override fun write(data:ByteArray,offset:Int,length:Int){
+            require(length in 1..HackRfTx.CHUNK)
+            val request=idle.removeFirstOrNull()?:await()
+            val buffer=request.clientData as ByteBuffer
+            buffer.clear();buffer.put(data,offset,length);buffer.flip()
+            check(request.queue(buffer)){"The USB transfer was refused"}
+            busy++
+        }
+        override fun drain(){while(busy>0)idle.addLast(await())}
+        private fun await():UsbRequest{
+            val done=try{connection.requestWait(2000)}catch(_:java.util.concurrent.TimeoutException){null}?:error("The HackRF stopped taking samples")
+            busy--
+            return done
+        }
+        fun close(){requests.forEach{runCatching{it.cancel()};runCatching{it.close()}}}
+        companion object{const val DEPTH=4}
+    }
     companion object {
         fun supported(d:UsbDevice)=d.vendorId==0x1d50&&d.productId in listOf(0x6089,0x604b,0xcc15)
         fun devices(manager:UsbManager)=manager.deviceList.values.filter(::supported).sortedBy{it.deviceName}

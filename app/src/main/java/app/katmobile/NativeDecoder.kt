@@ -3,9 +3,9 @@ package app.katmobile
 import com.google.gson.Gson
 
 data class NativeProtocol(val name:String="",val rf:String="",val coding:String="",val format:String="")
-private data class NativeRecognition(val name:String="",val bits:Int=0,val integrity:String="")
+private data class NativeRecognition(val name:String="",val bits:Int=0,val integrity:String="",val decode:com.google.gson.JsonObject?=null)
 
-/** Read-only JNI API: protocol identity and integrity, without secret/authentication material. */
+/** KAT's receive core over JNI: the protocols that read a burst, their integrity, and the first one's decode (what its encoder sends from). */
 object NativeDecoder {
     private val gson=Gson()
     val protocols:List<NativeProtocol>
@@ -25,14 +25,14 @@ object NativeDecoder {
         if(!available||pulses.isEmpty()||pulses.size>32768)return null
         val input=IntArray(pulses.size){i->val p=pulses[i];if(p.level)p.duration_us else -p.duration_us}
         return runCatching{
-            val found=gson.fromJson(nativeIdentify(input,frequency,modulation=="FM",receiverPath),Array<NativeRecognition>::class.java)
+            val found=gson.fromJson(nativeDecode(input,frequency,modulation=="FM",receiverPath),Array<NativeRecognition>::class.java)
                 .filter{it.name.isNotBlank()&&it.bits in 1..4096}
             if(found.isEmpty())null else Recognition(found.joinToString(" + "){it.name},found.first().bits,
-                "KAT RX · "+found.joinToString("; "){"${it.name}: ${it.bits} bit · ${it.integrity}"})
+                "KAT RX · "+found.joinToString("; "){"${it.name}: ${it.bits} bit · ${it.integrity}"},found.first().decode?.toString().orEmpty())
         }.getOrNull()
     }
     fun reset(){if(available)nativeReset()}
     @JvmStatic private external fun nativeCatalog():String
-    @JvmStatic private external fun nativeIdentify(pulses:IntArray,frequency:Long,fm:Boolean,receiverPath:Boolean):String
+    @JvmStatic private external fun nativeDecode(pulses:IntArray,frequency:Long,fm:Boolean,receiverPath:Boolean):String
     @JvmStatic private external fun nativeReset()
 }

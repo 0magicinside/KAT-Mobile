@@ -32,7 +32,7 @@ class ReceivePipeline(private val settings:RadioSettings,private val inputOffset
             if(match!=null||settings.showUnknown){
                 val diagnostic=String.format(Locale.US,"KAT DSP · SNR %.1f dB · offset %+.1f kHz",b.snr_db,b.offset_hz/1000)
                 capture(Capture(frequency=frequency,modulation=b.modulation,protocol=match?.name?:"Unknown",
-                    recognition=listOfNotNull(match?.evidence,diagnostic).joinToString(" · "),pulses=pulses))
+                    recognition=listOfNotNull(match?.evidence,diagnostic).joinToString(" · "),pulses=pulses).withDecode(match?.decode.orEmpty()))
             }
         }
     }

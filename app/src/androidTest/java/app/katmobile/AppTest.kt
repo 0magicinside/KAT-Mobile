@@ -58,7 +58,7 @@ class AppTest {
         compose.onNodeWithText("What's new").performClick()
         compose.onNodeWithText("What's new · ${BuildConfig.VERSION_NAME}").assertExists()
         compose.onNodeWithText("English edition").assertExists()
-        compose.onNodeWithText("KAT 1.29.0 receive core").assertExists()
+        compose.onNodeWithText("KAT ${BuildConfig.KAT_CORE} receive core").assertExists()
         capture("09-whats-new")
         compose.onNodeWithText("Close").performClick()
     }
@@ -66,6 +66,7 @@ class AppTest {
         compose.onNodeWithText("Start RX").assertIsDisplayed();capture("01-receiver")
         compose.onNodeWithContentDescription("Settings",useUnmergedTree=true).performClick()
         capture("02-settings");compose.onNodeWithText("Frequency (MHz)").assertExists()
+        compose.onNodeWithTag("settings-list").performScrollToNode(hasText("TX power: 47 dB + amp"));compose.onNodeWithText("TX power: 47 dB + amp").assertExists()
         compose.onNodeWithText("Signals",useUnmergedTree=true).performClick();compose.onNodeWithText("Signals (0)").assertExists()
         compose.onNodeWithText("Archive",useUnmergedTree=true).performClick();compose.onNodeWithText("IQ archive").assertExists()
     }
@@ -135,6 +136,70 @@ class AppTest {
         repeat(4){"101001011001011010010110".forEach{bit->segment(if(bit=='1')1170 else 390,true);segment(if(bit=='1')390 else 1170,false)};segment(390,true);segment(11700,false)}
         segment(100000,false)
         return bytes.toByteArray()
+    }
+    /** A virtual DoorHan remote that KAT's "Add manually" creates (serial 0x1234; not a real remote). */
+    private val doorhan="""{"protocol":"KeeLoq (DoorHan)","serial":4660,"button":2,"counter":3,"crc_valid":true,"data":"B910EF112C480004","bits":64,"encoder_capable":true}"""
+    /** Feed IQ as the HackRF sends it (2 MS/s, the waveform 500 kHz above the LO) through KAT's receiver. */
+    private fun receiveBack(iq:ByteArray):List<Capture>{
+        val heard=mutableListOf<Capture>()
+        ReceivePipeline(RadioSettings(),500_000.0,heard::add).use{rx->
+            val silence=ByteArray(160_000)
+            for(block in listOf(silence,iq,silence,silence))for(start in block.indices step 16384)rx.process(block.copyOfRange(start,minOf(block.size,start+16384)))
+            rx.flush()
+        }
+        return heard
+    }
+    @Test fun transmissionsAreReceivedBackThroughKatsReceiverOnDevice(){
+        assertTrue(NativeDecoder.available)
+        val captures=mutableListOf<Capture>()
+        ReceivePipeline(RadioSettings(modulation="AM"),captures::add).use{rx->val raw=princetonIq(0.0);for(start in raw.indices step 16384)rx.process(raw.copyOfRange(start,minOf(raw.size,start+16384)));rx.flush()}
+        val c=captures.first{it.protocol.split(" + ").contains("Princeton")}
+        assertTrue("decode: ${c.decode}",c.decode.contains("\"protocol\":\"Princeton\""))
+        val actions=NativeTx.actions(c.decode);assertTrue("$actions",actions.encodes&&actions.gate)
+        for(action in listOf("replay","next")){
+            val plan=NativeTx.plan(c,action);val iq=NativeTx.iq(plan)
+            assertEquals(action,4*plan.air_us,iq.size.toLong());assertFalse(plan.fsk);assertNull("a fixed code keeps its capture",plan.sent)
+            val heard=receiveBack(iq)
+            assertTrue("$action: ${heard.map{it.protocol}}",heard.any{it.protocol.split(" + ").contains("Princeton")})
+        }
+    }
+    @Test fun aRollingCodeAdvancesWithEveryPressOnDevice(){
+        val remote=Capture(protocol="KeeLoq",frequency=433_920_000,modulation="AM",source="Test").withDecode(doorhan)
+        val actions=NativeTx.actions(remote.decode);assertTrue("$actions",actions.encodes&&actions.gate&&actions.buttons.isNotEmpty())
+        compose.runOnIdle{Hub.importCapture(remote)}
+        val counters=mutableListOf<Int>()
+        repeat(3){press->
+            val c=Hub.captures.value.single{it.id==remote.id}
+            val plan=NativeTx.plan(c,"next");assertNotNull("press ${press+1}",plan.sent);assertTrue(NativeTx.iq(plan).isNotEmpty())
+            // What the radio service does once the transmission went out.
+            Hub.transmitted(Hub.TxRequest(c.id,"the next code",c.frequency,plan))
+            counters+=Hub.captures.value.single{it.id==remote.id}.counter.toInt(16)
+        }
+        assertTrue("$counters",counters[0]>3&&counters.zipWithNext().all{(a,b)->b>a})
+        assertTrue(Hub.txMessage.value.startsWith("Sent the next code · counter"))
+        val button=NativeTx.plan(Hub.captures.value.single{it.id==remote.id},"button",actions.buttons.first().code)
+        assertEquals(actions.buttons.first().code,button.button)
+    }
+    @Test fun transmitControlsFollowTheRemoteAndNeedAHackRf(){
+        val gate=Capture(protocol="KeeLoq",frequency=433_920_000,modulation="AM",source="Test",pulses=listOf(Pulse(true,400),Pulse(false,800))).withDecode(doorhan)
+        compose.runOnIdle{Hub.importCapture(gate)}
+        compose.onNodeWithText("Signals",useUnmergedTree=true).performClick();compose.onNodeWithText("KeeLoq").performClick();compose.onAllNodesWithTag("capture-row").onFirst().performClick()
+        compose.onNodeWithText("Serial: 0001234",substring=true).assertExists()
+        compose.onNodeWithText("Replay").assertExists();compose.onNodeWithText("Send next code").assertExists();compose.onNodeWithText("Send button…").assertExists()
+        capture("10-transmit")
+        compose.onNodeWithText("Send next code").performScrollTo().performClick()
+        compose.waitUntil(5000){Hub.notice.value.isNotBlank()}
+        compose.onNodeWithText("No HackRF device.",substring=true).assertExists()
+        compose.onNodeWithText("OK").performClick()
+        assertFalse(Hub.status.value.transmitting);assertNull(Hub.pendingTx.get())
+        compose.onNodeWithText("Close").performClick()
+        // A car remote gets the car commands (desktop KAT's TX Lock … Panic).
+        val car=Capture(protocol="Ford V0",frequency=315_000_000,modulation="FM",source="Test").withDecode("""{"protocol":"Ford V0","serial":1193046,"button":1,"counter":5,"crc_valid":true,"data":"0","bits":80,"encoder_capable":true}""")
+        compose.runOnIdle{Hub.importCapture(car)}
+        compose.onNodeWithText("All protocols").performClick();compose.onNodeWithText("Ford V0").performClick();compose.onAllNodesWithTag("capture-row").onFirst().performClick()
+        for(command in listOf("TX Lock","TX Unlock","TX Trunk","TX Panic"))compose.onNodeWithText(command).assertExists()
+        compose.onNodeWithText("Send next code").assertDoesNotExist()
+        compose.onNodeWithText("Close").performClick()
     }
     @Test fun desktopDspRecognizesNoisyOffsetPrincetonOnAndroid(){
         for(offset in listOf(-250000.0,150000.0)){

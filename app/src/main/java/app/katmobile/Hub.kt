@@ -15,6 +15,11 @@ object Hub {
     val logs=MutableStateFlow<List<String>>(emptyList())
     val notice=MutableStateFlow("")
     val offlineBusy=MutableStateFlow(false)
+    /** A transmission for the radio service: the capture, what it sends, and KAT's plan of it. */
+    data class TxRequest(val captureId:String,val what:String,val carrier:Long,val plan:TxPlan)
+    val pendingTx=java.util.concurrent.atomic.AtomicReference<TxRequest?>(null)
+    /** The last transmission's result, for the signal details. */
+    val txMessage=MutableStateFlow("")
     private var vault:Vault?=null
     private val scope=CoroutineScope(SupervisorJob()+Dispatchers.IO)
     private var pending:Job?=null
@@ -38,9 +43,19 @@ object Hub {
         latestReception.value=c
         val same=captures.value.lastOrNull{it.frequency==c.frequency&&it.modulation==c.modulation&&it.fingerprint==c.fingerprint}
         if(same!=null&&(settings.value.ignoreDuplicates||c.time-same.time<500))captures.value=captures.value.map{if(it.id==same.id)it.copy(repeats=it.repeats+1,
-            protocol=if(c.protocol!="Unknown")c.protocol else it.protocol,recognition=c.recognition.ifBlank{it.recognition})else it}
+            protocol=if(c.protocol!="Unknown")c.protocol else it.protocol,recognition=c.recognition.ifBlank{it.recognition})
+            .let{merged->if(merged.decode.isBlank())merged.withDecode(c.decode)else merged} else it}
         else captures.value=bounded(captures.value+c)
         if(settings.value.autosave)persist()
+    }
+    /** A transmission went out. A rolling code's capture keeps the frame sent (desktop KAT's `store_sent_frame`), so the next press sends the code after. */
+    @Synchronized fun transmitted(r:TxRequest){
+        val sent=r.plan.sent
+        if(sent!=null)captures.value=captures.value.map{if(it.id==r.captureId)it.withDecode(sent.toString())else it}
+        val counter=sent?.get("counter")?.takeIf{it.isJsonPrimitive}?.asLong?.let{" · counter %04X".format(java.util.Locale.US,it)}.orEmpty()
+        txMessage.value="Sent ${r.what}$counter · ${r.plan.modulation} · ${"%.3f".format(java.util.Locale.US,r.carrier/1e6)} MHz"
+        log(txMessage.value)
+        persist()
     }
     @Synchronized fun delete(ids:Set<String>){removed=captures.value.filter{it.id in ids};captures.value=captures.value.filterNot{it.id in ids};persist()}
     @Synchronized fun undo(){captures.value=bounded((captures.value+removed).distinctBy{it.id}.sortedBy{it.time});removed=emptyList();persist()}

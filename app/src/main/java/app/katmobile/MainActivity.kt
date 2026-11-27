@@ -57,19 +57,21 @@ private fun size(bytes:Long)=when{bytes>=1024*1024->"%.1f MB".format(bytes/10485
 
 class MainActivity:ComponentActivity(){
     private val permissionAction="app.katmobile.USB_PERMISSION"
+    private val txPermissionAction="app.katmobile.USB_PERMISSION_TX"
     private val receiver=object:BroadcastReceiver(){override fun onReceive(context:Context,intent:Intent){
-        if(intent.action==permissionAction){
+        if(intent.action==permissionAction||intent.action==txPermissionAction){
             @Suppress("DEPRECATION")val device=intent.getParcelableExtra<android.hardware.usb.UsbDevice>(UsbManager.EXTRA_DEVICE)
-            if(device!=null&&getSystemService(UsbManager::class.java).hasPermission(device))RadioService.action(this@MainActivity,"START",device.deviceName)
-            else Hub.notice.value="USB permission was not granted"
+            if(device==null||!getSystemService(UsbManager::class.java).hasPermission(device)){Hub.pendingTx.set(null);Hub.notice.value="USB permission was not granted"}
+            // Asked for a transmission: it goes out now (Hub.pendingTx); else reception starts.
+            else RadioService.action(this@MainActivity,if(intent.action==txPermissionAction)"TX" else "START",device.deviceName)
         }
     }}
     private val notifications=registerForActivityResult(ActivityResultContracts.RequestPermission()){}
     override fun onCreate(savedInstanceState:Bundle?){super.onCreate(savedInstanceState);Hub.initialize(this)
         if(!NativeDecoder.available)Hub.notice.value="The native KAT core could not be loaded. Only basic decoders are available; check the APK architecture."
-        val filter=IntentFilter(permissionAction)
+        val filter=IntentFilter().apply{addAction(permissionAction);addAction(txPermissionAction)}
         androidx.core.content.ContextCompat.registerReceiver(this,receiver,filter,androidx.core.content.ContextCompat.RECEIVER_NOT_EXPORTED)
-        setContent{MaterialTheme(colorScheme=colors){App(::startRadio)}}
+        setContent{MaterialTheme(colorScheme=colors){App(::startRadio,::startTransmit)}}
         if(Build.VERSION.SDK_INT>=33&&checkSelfPermission(android.Manifest.permission.POST_NOTIFICATIONS)!=android.content.pm.PackageManager.PERMISSION_GRANTED)notifications.launch(android.Manifest.permission.POST_NOTIFICATIONS)
     }
     private fun startRadio(){
@@ -82,6 +84,19 @@ class MainActivity:ComponentActivity(){
             else manager.requestPermission(device,PendingIntent.getBroadcast(this,4,Intent(permissionAction).setPackage(packageName).putExtra(UsbManager.EXTRA_DEVICE,device),PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE))
         }catch(e:Exception){Hub.notice.value=e.message?:"USB is unavailable"}
     }
+    /** Hand a transmission to the radio service; without USB access yet, Android asks, and it goes out once granted. */
+    private fun startTransmit(request:Hub.TxRequest){
+        try{
+            check(!Hub.offlineBusy.value){"Stop IQ file analysis first"}
+            check(!Hub.status.value.transmitting){"A transmission is already on air"}
+            val manager=getSystemService(UsbManager::class.java)
+            val device=HackRfUsb.devices(manager).firstOrNull()
+            if(device==null){Hub.notice.value="No HackRF device. Connect a USB OTG cable and, if needed, a powered hub.";return}
+            Hub.pendingTx.set(request)
+            if(manager.hasPermission(device))RadioService.action(this,"TX",device.deviceName)
+            else manager.requestPermission(device,PendingIntent.getBroadcast(this,5,Intent(txPermissionAction).setPackage(packageName).putExtra(UsbManager.EXTRA_DEVICE,device),PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE))
+        }catch(e:Exception){Hub.pendingTx.set(null);Hub.notice.value=e.message?:"USB is unavailable"}
+    }
     override fun onDestroy(){unregisterReceiver(receiver);super.onDestroy()}
     override fun onStop(){super.onStop();Hub.persist()}
 }
@@ -90,7 +105,7 @@ class MainActivity:ComponentActivity(){
     Surface(color=Panel,shape=RoundedCornerShape(16.dp),border=BorderStroke(1.dp,Color(0xFF243B45)),modifier=modifier){Column(Modifier.padding(16.dp),verticalArrangement=Arrangement.spacedBy(10.dp)){Text(title,color=Cyan,fontSize=12.sp,fontFamily=FontFamily.Monospace,fontWeight=FontWeight.Bold);content()}}
 }
 
-@Composable private fun App(start:()->Unit){
+@Composable private fun App(start:()->Unit,transmit:(Hub.TxRequest)->Unit){
     val s by Hub.settings.collectAsStateWithLifecycle();val status by Hub.status.collectAsStateWithLifecycle()
     val captures by Hub.captures.collectAsStateWithLifecycle();val notice by Hub.notice.collectAsStateWithLifecycle()
     val latestReception by Hub.latestReception.collectAsStateWithLifecycle()
@@ -128,6 +143,14 @@ class MainActivity:ComponentActivity(){
         }catch(e:Exception){Hub.notice.value=e.message?:"Import failed"}finally{importBusy=false}
     }}
     fun exportCapture(c:Capture,format:String){try{exportData=when(format){"sub"->StateFormat.rawSub(c);"fob"->StateFormat.fob(c);else->StateFormat.captureJson(c,s.includeRaw)}.toByteArray();export.launch("KAT_${c.frequency}_${c.id.take(8)}.$format")}catch(e:Exception){Hub.notice.value=e.message?:"Export failed"}}
+    // KAT's core plans the transmission (Replay, or its encoder with the copies KAT sends); the radio service sends it.
+    fun send(c:Capture,action:String,button:TxButton?){scope.launch{
+        try{
+            val plan=withContext(Dispatchers.Default){NativeTx.plan(c,action,button?.code)}
+            val what=when(action){"replay"->"a replay of ${c.pulses.size} pulses";"next"->"the next code"+plan.button_label?.let{" ($it)"}.orEmpty();else->plan.button_label?:button?.label?:"a button"}
+            transmit(Hub.TxRequest(c.id,what,c.frequency,plan))
+        }catch(e:Exception){Hub.notice.value=e.message?:"This capture cannot be sent"}
+    }}
     DisposableEffect(s.keepScreen){val window=(context as ComponentActivity).window;if(s.keepScreen)window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);onDispose{window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)}}
     if(notice.isNotBlank())AlertDialog(onDismissRequest={Hub.notice.value=""},title={Text("KAT Mobile")},text={Text(notice)},confirmButton={TextButton(onClick={Hub.notice.value=""}){Text("OK")}})
     if(clear)AlertDialog(onDismissRequest={clear=false},title={Text("Clear signal history?")},text={Text("Clears captured signal history. Settings and IQ files are retained.")},confirmButton={TextButton(onClick={Hub.delete(captures.map{it.id}.toSet());selected=null;clear=false}){Text("Delete")}},dismissButton={TextButton(onClick={clear=false}){Text("Cancel")}})
@@ -138,6 +161,7 @@ class MainActivity:ComponentActivity(){
         Text("${c.pulses.size} pulses · ${c.durationUs/1000.0} ms · ×${c.repeats}",fontFamily=FontFamily.Monospace,fontSize=12.sp)
         if(c.recognition.isNotBlank())Text(c.recognition,color=Green,fontSize=12.sp)
         if(c.serial.isNotBlank())Text("Serial: ${c.serial}\nButton: ${c.button}\nCounter: ${c.counter}",fontFamily=FontFamily.Monospace,fontSize=12.sp)
+        TransmitControls(c,!status.transmitting&&!offline,::send)
         PulsePlot(c,Modifier.fillMaxWidth().height(110.dp))
         val groups=c.pulses.groupingBy{(it.duration_us/25)*25}.eachCount().entries.sortedByDescending{it.value}.take(8)
         Text("PULSE DURATION",color=Dim,fontSize=11.sp)
@@ -151,7 +175,7 @@ class MainActivity:ComponentActivity(){
     }}){insets->Column(Modifier.fillMaxSize().padding(insets).padding(horizontal=18.dp)){
         Row(Modifier.fillMaxWidth().padding(vertical=16.dp),verticalAlignment=Alignment.CenterVertically){
             Icon(Icons.Outlined.GraphicEq,null,tint=Green,modifier=Modifier.size(28.dp));Spacer(Modifier.width(10.dp));Column(Modifier.weight(1f)){Text("KAT",fontWeight=FontWeight.Bold,fontSize=25.sp,fontFamily=FontFamily.Monospace);Text("KAT — coded by CooKie",color=Dim,fontSize=10.sp,letterSpacing=.5.sp)}
-            Surface(color=(if(status.running)Green else Dim).copy(alpha=.12f),shape=RoundedCornerShape(10.dp)){Text(if(status.running)"● LIVE RX"else if(offline)"● IQ FILE"else"○ IDLE",color=if(status.running)Green else if(offline)Cyan else Dim,fontFamily=FontFamily.Monospace,fontSize=11.sp,modifier=Modifier.padding(10.dp))}
+            Surface(color=(if(status.running||status.transmitting)Green else Dim).copy(alpha=.12f),shape=RoundedCornerShape(10.dp)){Text(if(status.transmitting)"● TX"else if(status.running)"● LIVE RX"else if(offline)"● IQ FILE"else"○ IDLE",color=if(status.running||status.transmitting)Green else if(offline)Cyan else Dim,fontFamily=FontFamily.Monospace,fontSize=11.sp,modifier=Modifier.padding(10.dp))}
         }
         val wide=androidx.compose.ui.platform.LocalConfiguration.current.screenWidthDp>=700
         Row(Modifier.fillMaxWidth().weight(1f),horizontalArrangement=Arrangement.spacedBy(16.dp)){
@@ -160,7 +184,7 @@ class MainActivity:ComponentActivity(){
                 item{Frame("RADIO / HACKRF"){Row(Modifier.fillMaxWidth(),horizontalArrangement=Arrangement.SpaceBetween,verticalAlignment=Alignment.Bottom){Text(frequency(if(status.running)status.frequency else s.frequency),fontSize=30.sp,fontFamily=FontFamily.Monospace,fontWeight=FontWeight.Bold);Text(s.modulation,color=Cyan)}
                     Text("${s.sampleRate/1_000_000} MS/s   LNA ${s.lna}   VGA ${s.vga}   AMP ${if(s.amp)"ON"else"OFF"}",color=Dim,fontFamily=FontFamily.Monospace,fontSize=11.sp)
                     Row(horizontalArrangement=Arrangement.spacedBy(10.dp)){
-                        Button(onClick={if(status.running)RadioService.action(context,"STOP")else start()},enabled=!offline){Icon(if(status.running)Icons.Outlined.Stop else Icons.Outlined.PlayArrow,null);Text(if(status.running)"Stop RX"else"Start RX")}
+                        Button(onClick={if(status.running)RadioService.action(context,"STOP")else start()},enabled=!offline&&!status.transmitting){Icon(if(status.running)Icons.Outlined.Stop else Icons.Outlined.PlayArrow,null);Text(if(status.running)"Stop RX"else"Start RX")}
                         OutlinedButton(onClick={RadioService.action(context,"RECORD")},enabled=status.running){Icon(if(status.recording.isNotBlank())Icons.Outlined.StopCircle else Icons.Outlined.FiberManualRecord,null);Text(if(status.recording.isNotBlank())"Stop IQ"else"Record IQ")}
                     }
                     if(s.hopping)Text(if(status.running)"HOP ${status.hopIndex}/${status.hopTotal} · ${s.hopDwellMs} ms · ${status.hopSwitches} switches"else"HOP ready · ${s.hopDwellMs} ms per frequency",color=Green,fontFamily=FontFamily.Monospace,fontSize=12.sp)
@@ -204,6 +228,27 @@ class MainActivity:ComponentActivity(){
         }
         }
     }}
+}
+
+/** Desktop KAT's transmit actions: Replay for any capture; a car remote's Lock, Unlock, Trunk and Panic; a gate remote's next code and its own buttons. */
+@Composable private fun TransmitControls(c:Capture,enabled:Boolean,send:(Capture,String,TxButton?)->Unit){
+    val tx=remember(c.decode){NativeTx.actions(c.decode)}
+    val message by Hub.txMessage.collectAsStateWithLifecycle()
+    Text("TRANSMIT",color=Dim,fontSize=11.sp)
+    Row{
+        TextButton(onClick={send(c,"replay",null)},enabled=enabled&&c.pulses.isNotEmpty()){Text("Replay")}
+        if(tx.encodes&&tx.gate)TextButton(onClick={send(c,"next",null)},enabled=enabled){Text("Send next code")}
+    }
+    if(tx.encodes&&!tx.gate)tx.buttons.chunked(2).forEach{row->Row{row.forEach{b->TextButton(onClick={send(c,"button",b)},enabled=enabled){Text("TX ${b.label}")}}}}
+    if(tx.encodes&&tx.gate&&tx.buttons.isNotEmpty()){
+        var open by remember{mutableStateOf(false)}
+        Box{
+            OutlinedButton(onClick={open=true},enabled=enabled){Text("Send button…")}
+            DropdownMenu(expanded=open,onDismissRequest={open=false}){tx.buttons.forEach{b->DropdownMenuItem(text={Text(b.label)},onClick={open=false;send(c,"button",b)})}}
+        }
+    }
+    if(!tx.encodes&&c.decode.isNotBlank())Text("KAT cannot build this remote's codes (its key is not known): Replay only.",color=Dim,fontSize=11.sp)
+    if(message.isNotBlank())Text(message,color=Green,fontSize=11.sp)
 }
 
 @Composable private fun LatestReception(c:Capture?,running:Boolean,offline:Boolean,open:(Capture)->Unit){
@@ -292,21 +337,29 @@ class MainActivity:ComponentActivity(){
         item{Text("Settings",fontSize=28.sp,fontWeight=FontWeight.Bold);Text("KAT controls · USB reception",color=Dim,fontSize=12.sp)}
         item{Frame("PROTOCOLS / KAT RX"){
             Text(if(NativeDecoder.available)"${NativeDecoder.protocols.size} native KAT receive decoders"else"Native core unavailable",color=Green,fontSize=15.sp)
-            Text("AUTO checks both AM and FM paths. The registry is adapted from KAT; not every physical model has been verified. Receive-only operation.",color=Dim,fontSize=12.sp)
+            Text("AUTO checks both AM and FM paths. The registry is KAT's; not every physical model has been verified. Transmit from a signal's details.",color=Dim,fontSize=12.sp)
             OutlinedButton(onClick={catalog=true}){Text("View supported protocols")}
         }}
         item{Frame("RADIO"){OutlinedTextField(frequency,{frequency=it},label={Text("Frequency (MHz)")},enabled=!running,singleLine=true,modifier=Modifier.fillMaxWidth());Choice("Sample rate",edit.sampleRate.toString(),listOf(2_000_000,4_000_000,8_000_000,10_000_000,16_000_000,20_000_000).map{it.toString()},!running){value->val rate=value.toInt();edit=edit.copy(sampleRate=rate,bandwidth=edit.bandwidth.coerceAtMost(Wire.bandwidths.last{it<=rate}))};Choice("LNA gain (dB)",edit.lna.toString(),(0..40 step 8).map{it.toString()},!running){edit=edit.copy(lna=it.toInt())};Choice("VGA gain (dB)",edit.vga.toString(),(0..62 step 2).map{it.toString()},!running){edit=edit.copy(vga=it.toInt())};Toggle("RF amplifier (AMP)",edit.amp,!running){edit=edit.copy(amp=it)};Choice("Filter bandwidth",edit.bandwidth.toString(),Wire.bandwidths.filter{it<=edit.sampleRate}.map{it.toString()},!running){edit=edit.copy(bandwidth=it.toInt())};Choice("Demodulation",edit.modulation,listOf("AUTO","AM","FM"),!running){edit=edit.copy(modulation=it)}}}
+        item{Frame("TRANSMIT"){Choice("TX power",txPowerLabel(edit.txVga,edit.txAmp),TX_POWER_STEPS.map{(g,a)->txPowerLabel(g,a)},!running){label->TX_POWER_STEPS.firstOrNull{(g,a)->txPowerLabel(g,a)==label}?.let{(g,a)->edit=edit.copy(txVga=g,txAmp=a)}};Text("Replay, Send next code and the car and gate buttons (in a signal's details) transmit through the HackRF with this TX gain and RF amplifier, as desktop KAT does. Receiving pauses for a transmission. Transmit only to systems you own or may test.",color=Dim,fontSize=11.sp)}}
         item{Frame("FREQUENCY HOPPING"){Toggle("Hop",edit.hopping,!running){edit=edit.copy(hopping=it)};OutlinedTextField(edit.hopFrequencies,{edit=edit.copy(hopFrequencies=it)},label={Text("Frequencies in MHz, separated by commas")},enabled=!running,modifier=Modifier.fillMaxWidth());NumberField("Time per frequency (ms)",edit.hopDwellMs,!running){edit=edit.copy(hopDwellMs=it)};Text("Hop continuously cycles through the list at the set interval, without waiting for a signal to end. A transmission crossing a hop may be incomplete. IQ recording uses one fixed frequency.",color=Dim,fontSize=11.sp)}}
         item{Frame("SIGNAL / DETECTION"){Text("Original KAT DSP: carrier detection, channel filtering, adaptive AM/FM thresholds and pulse extraction. Bursts close after 80 ms of silence. Legacy manual detector settings do not control this pipeline.",color=Dim,fontSize=12.sp);Toggle("Show unknown signals",edit.showUnknown,!running){edit=edit.copy(showUnknown=it)};Toggle("Merge duplicates",edit.ignoreDuplicates,!running){edit=edit.copy(ignoreDuplicates=it)}}}
         item{Frame("SESSION / ARCHIVE"){NumberField("Maximum captures",edit.maxCaptures,!running){edit=edit.copy(maxCaptures=it)};NumberField("IQ quota (MB)",edit.recordingQuotaMb,!running){edit=edit.copy(recordingQuotaMb=it)};Toggle("Save session automatically",edit.autosave,!running){edit=edit.copy(autosave=it)};Toggle("Include RAW pulses in JSON export",edit.includeRaw,!running){edit=edit.copy(includeRaw=it)};Toggle("Keep screen on",edit.keepScreen,!running){edit=edit.copy(keepScreen=it)};NumberField("Signal text size",edit.fontSize,!running){edit=edit.copy(fontSize=it)}}}
         item{Button(onClick=::save,enabled=!running,modifier=Modifier.fillMaxWidth()){Text("Save settings")};OutlinedButton(onClick=import,enabled=!running,modifier=Modifier.fillMaxWidth()){Text("Import KAT config.ini / RAW / FOB")};if(running)Text("Stop RX to change settings.",color=Cyan)}
         item{Frame("THANK YOU",Modifier.testTag("kara-thanks")){Text("Thank you, Kara, for supporting me in developing the Android app.",color=Green,fontSize=15.sp);Text("— CooKie",color=Dim,fontSize=12.sp)}}
-        item{Frame("ABOUT"){OutlinedButton(onClick={whatsNew=true}){Text("What's new")};Text("KAT Mobile RX ${BuildConfig.VERSION_NAME}\nReceive core: KAT 1.29.0\nConnection: Android USB Host, no root required.",fontSize=12.sp,color=Dim);Text("${NativeDecoder.protocols.size} native KAT receive decoders, plus Nexus/TFA and Rubicson/Solight sensors. A format match does not confirm a manufacturer; not every physical model has been verified.",fontSize=12.sp,color=Dim);Text("The native core returns format identity, bit count and integrity checks. Imported FOB metadata is preserved. No key recovery or TX/replay functions are exposed.",fontSize=12.sp,color=Dim);Text("Data stays on this device. Sessions use Android Keystore encryption; IQ recordings are stored in app-private storage. No network permission.",fontSize=12.sp,color=Dim);Text("KAT source: BSD-3-Clause, © 2026 .kara. Original license notices are included in the project and APK.",fontSize=11.sp,color=Dim)}}
+        item{Frame("ABOUT"){OutlinedButton(onClick={whatsNew=true}){Text("What's new")};Text("KAT Mobile RX ${BuildConfig.VERSION_NAME}\nReceive core: KAT ${BuildConfig.KAT_CORE}\nConnection: Android USB Host, no root required.",fontSize=12.sp,color=Dim);Text("${NativeDecoder.protocols.size} native KAT receive decoders, plus Nexus/TFA and Rubicson/Solight sensors. A format match does not confirm a manufacturer; not every physical model has been verified.",fontSize=12.sp,color=Dim);Text("KAT's receive core identifies each signal, and KAT's encoders send Replay, Send next code and the car and gate buttons through the HackRF (a signal's details, Transmit). Key recovery is not part of the app. Imported FOB metadata is preserved.",fontSize=12.sp,color=Dim);Text("Data stays on this device. Sessions use Android Keystore encryption; IQ recordings are stored in app-private storage. No network permission.",fontSize=12.sp,color=Dim);Text("KAT source: BSD-3-Clause, © 2026 .kara. Original license notices are included in the project and APK.",fontSize=11.sp,color=Dim)}}
     }
 }
 
 @Composable private fun WhatsNew(close:()->Unit){
     AlertDialog(onDismissRequest=close,title={Text("What's new · ${BuildConfig.VERSION_NAME}")},text={Column(Modifier.verticalScroll(rememberScrollState()),verticalArrangement=Arrangement.spacedBy(12.dp)){
+        Text("Transmit",color=Green,fontWeight=FontWeight.Bold)
+        Text("KAT Mobile transmits through the HackRF, as KAT does. Replay sends a capture's pulses; a car remote's Lock, Unlock, Trunk and Panic and a gate remote's Send next code and buttons come from KAT's encoders, and a rolling code's counter advances with every press. Receiving pauses for a transmission; TX power is in Settings.")
+        Text("KAT ${BuildConfig.KAT_CORE} receive core",color=Green,fontWeight=FontWeight.Bold)
+        Text("KAT Mobile's version now follows KAT's: this release's receive core is KAT ${BuildConfig.KAT_CORE}'s, with the same ${NativeDecoder.protocols.size} decoders, its encoders, and KAT's embedded keys, which it now loads at start as KAT does: the Kia V3/V4, V5 and V6, VAG, PSA, Ford V1, BMW V3 and Audi V3 decoders decrypt with them.")
+        Text("KAT's official Android app",color=Green,fontWeight=FontWeight.Bold)
+        Text("KAT Mobile is now built and tested from github.com/KaraZajac/KAT-Mobile on every change. Its application ID is io.karazajac.katmobile, so it installs beside the earlier test builds; the notification's Stop button is now in English.")
+        Text("0.8.0",color=Dim,fontWeight=FontWeight.Bold)
         Text("English edition",color=Green,fontWeight=FontWeight.Bold)
         Text("All screens, settings, notifications and app messages are now in English.")
         Text("KAT 1.29.0 receive core",color=Green,fontWeight=FontWeight.Bold)

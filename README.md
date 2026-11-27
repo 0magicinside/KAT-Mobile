@@ -1,9 +1,10 @@
 # KAT Mobile
 
 The Android edition of [KAT](https://github.com/KaraZajac/KAT), the Keyfob Analysis Toolkit. A phone
-with a **HackRF** on USB OTG receives, records and identifies car key fob, gate, garage door and
-sensor signals with KAT's own receive core, without a computer. It is receive-only: no
-transmission, replay or key recovery.
+with a **HackRF** on USB OTG receives, records, identifies and transmits car key fob, gate, garage
+door and sensor signals with KAT's own code, without a computer: Replay, and KAT's encoders for
+"Send next code" and the car and gate buttons, a rolling code's counter advancing with every press.
+Key recovery is not part of the app.
 
 KAT Mobile was written by **CooKie** as an Android adaptation of KAT, and is maintained here as
 KAT's official Android app.
@@ -13,7 +14,7 @@ KAT's official Android app.
 ## Security and legal disclaimer
 
 **Use KAT Mobile only on systems and vehicles you own or have explicit, written permission to
-test.** Capturing or decoding keyfob and vehicle-access signals without authorization may be
+test.** Capturing, decoding, or transmitting keyfob and vehicle-access signals without authorization may be
 illegal in your jurisdiction (e.g. computer misuse, unauthorized access, or radio regulations). You
 are solely responsible for ensuring your use complies with all applicable laws. KAT Mobile is
 intended for security research, authorized penetration testing, education, and legitimate testing
@@ -27,10 +28,18 @@ arising from use of this software.
 - **HackRF over USB OTG** — a HackRF One, Jawbreaker or rad1o through Android's USB host API: no
   root and no driver app. Frequency, sample rate (2–20 MS/s), LNA and VGA gains, the RF amplifier,
   the baseband filter and AM, FM or both (AUTO).
-- **KAT's receive core** — KAT 1.29.0's receive pipeline (burst detection, channel filtering, the
-  AM and FM slicers) and its protocol decoders, built from KAT's Rust source and called over JNI.
-  A signal is listed with its protocol, bit count and whether its checksum holds; frames that
-  fail their checksum are dropped. Serials, counters and keys stay inside the core.
+- **KAT's core** — KAT 1.30.0's receive pipeline (burst detection, channel filtering, the AM and
+  FM slicers), its protocol decoders and encoders and its embedded keys, built from KAT's Rust
+  source and called over JNI. A signal is listed with its protocol, bit count, whether its
+  checksum holds, and its serial, button and counter, as KAT lists them; frames that fail their
+  checksum are dropped.
+- **Transmit** — from a signal's details, as KAT's signal menu offers it: **Replay** sends the
+  recorded pulses; a car remote gets **TX Lock, Unlock, Trunk and Panic**, a gate, garage, barrier
+  or alarm remote **Send next code** and its own buttons, from KAT's encoders with the copies KAT
+  sends. A rolling code's capture keeps the frame sent, so the next press sends the code after.
+  The waveform is KAT's (OOK or 2-FSK at the protocol's deviation, 500 kHz above the HackRF's LO,
+  so its LO leakage stays out of the receiver's channel), at the TX power set in Settings
+  (desktop KAT's steps, 47 dB + amp by default). Receiving pauses for a transmission.
 - **A few more formats** — Nexus/TFA and Rubicson/Solight weather sensors, and Princeton, CAME and
   Nice FLO fixed codes when the core reads nothing, from a small recognizer in Kotlin.
 - **Live view** — spectrum, waterfall, signal level and data rate, the latest signal received, and
@@ -86,7 +95,7 @@ On Windows, `Build.ps1` (or `BUILD-APK.cmd`) also runs the tests and checks the 
 
 ```sh
 ./gradlew testDebugUnitTest            # first: it writes the .fob that fob_interop reads
-(cd native && cargo test --locked)     # the receive core, on the computer
+(cd native && cargo test --locked)     # the core, on the computer: receiving, KAT's encoders, the IQ received back
 ```
 
 The instrumentation tests reset the saved session, so they run only in the QA app. With a phone or
@@ -100,20 +109,28 @@ adb shell pm grant io.karazajac.katmobile.qa android.permission.POST_NOTIFICATIO
 adb shell am instrument -w -e class app.katmobile.AppTest io.karazajac.katmobile.qa.test/androidx.test.runner.AndroidJUnitRunner
 ```
 
-CI runs all of them on every push, the instrumentation tests on an Android 14 emulator.
+CI runs all of them on every push, the instrumentation tests on an Android 14 emulator. The
+transmit tests send nothing on air: the encoders' frames are decoded back, the IQ goes through
+KAT's receiver, and the USB sequence runs against a simulated HackRF. Test a transmission on air
+with a receiver you own (KAT with an RTL-SDR, for instance).
 
 ## How it is built
 
-- `app/` — the Kotlin and Jetpack Compose app: the USB receiver (`HackRfUsb.kt`, receive requests
-  only), the radio service, storage, import and export, and the tests.
-- `native/src/` — KAT 1.29.0's receive code. `radio/` and 37 other files are KAT's unchanged; in
-  the rest, encoders, Flipper key files and key recovery are stubs, so the core cannot build a
-  transmission. `lib.rs` and `mobile_rx.rs` are the JNI layer, and `interop_fob.rs` is KAT's `.fob`
-  reader, used by the tests.
+- `app/` — the Kotlin and Jetpack Compose app: the HackRF over USB (`HackRfUsb.kt`, and
+  `Transmit.kt` for desktop KAT's transmit sequence), the radio service, storage, import and export,
+  and the tests.
+- `native/src/` — KAT 1.30.0's code: its receive pipeline, decoders, encoders and transmit waveform
+  (`radio/tx.rs`). 219 files are KAT's unchanged; the other four leave out what the app does not
+  have (key recovery, the user's key files, the vulnerability database). `lib.rs`, `mobile_rx.rs`
+  and `mobile_tx.rs` are the JNI layer (`mobile_tx.rs` does what desktop KAT's app does around its
+  encoders), and `interop_fob.rs` is KAT's `.fob` reader.
+- `tools/sync-kat-core.sh` brings a KAT release into `native/src`: `tools/sync-kat-core.sh ../KAT
+  v1.30.0 v1.31.0` merges KAT's changes in and keeps KAT Mobile's edits. A conflict means KAT
+  changed code that KAT Mobile edits. KAT Mobile's version follows KAT's.
 
 ## Credits
 
-- **CooKie** — the Android app and its adaptation of KAT's receive core.
+- **CooKie** — the Android app and its adaptation of KAT's core.
 - **KAT** — [github.com/KaraZajac/KAT](https://github.com/KaraZajac/KAT), whose decoders follow
   ProtoPirate, Flipper-ARF, doctor-firmware, Momentum, RogueMaster, FoxFW and rtl_433 (see KAT's
   credits).

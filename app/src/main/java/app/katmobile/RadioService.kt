@@ -12,6 +12,9 @@ import java.io.File
 class RadioService:Service() {
     private val scope=CoroutineScope(SupervisorJob()+Dispatchers.IO)
     private var job:Job?=null
+    private var txJob:Job?=null
+    /** Receiving stopped for a transmission and starts again after it: the receiver's end does not stop the service. */
+    @Volatile private var pausedForTx=false
     @Volatile private var radio:HackRfUsb?=null
     private var wake:PowerManager.WakeLock?=null
     private val fileLock=Any()
@@ -24,18 +27,53 @@ class RadioService:Service() {
     override fun onBind(intent:Intent?)=null
     override fun onCreate(){super.onCreate();Hub.initialize(this);getSystemService(NotificationManager::class.java).createNotificationChannel(NotificationChannel("radio","USB radio reception",NotificationManager.IMPORTANCE_LOW))}
     override fun onStartCommand(intent:Intent?,flags:Int,startId:Int):Int {
-        if(intent?.action=="START"){
+        val action=intent?.action
+        if(action=="START"||action=="TX"){
             val manager=getSystemService(UsbManager::class.java)
             val device=manager.deviceList.values.firstOrNull{it.deviceName==intent.getStringExtra("device")&&HackRfUsb.supported(it)}
-            if(device==null||!manager.hasPermission(device)){Hub.notice.value="The USB device is no longer available";stopSelf();return START_NOT_STICKY}
-            try{startForeground(8,notification())}catch(e:Exception){Hub.notice.value=e.message?:"Reception did not start";stopSelf();return START_NOT_STICKY}
-        }else if(job?.isActive!=true){stopSelf();return START_NOT_STICKY}
-        when(intent?.action){
-            "START"->if(job?.isActive!=true)startReceiver(intent.getStringExtra("device").orEmpty())
+            if(device==null||!manager.hasPermission(device)){Hub.notice.value="The USB device is no longer available";if(action=="TX")Hub.pendingTx.set(null);stopIfIdle();return START_NOT_STICKY}
+            try{startForeground(8,notification())}catch(e:Exception){Hub.notice.value=e.message?:"Reception did not start";if(action=="TX")Hub.pendingTx.set(null);stopIfIdle();return START_NOT_STICKY}
+        }else if(!busy()){stopSelf();return START_NOT_STICKY}
+        when(action){
+            "START"->if(!busy())startReceiver(intent.getStringExtra("device").orEmpty())
+            "TX"->transmit(intent.getStringExtra("device").orEmpty())
             "RECORD"->toggleRecording()
-            else->{radio?.stop();job?.cancel();closeRecording();stopSelf()}
+            else->{radio?.stop();job?.cancel();txJob?.cancel();closeRecording();stopSelf()}
         }
         return START_NOT_STICKY
+    }
+    private fun busy()=job?.isActive==true||txJob?.isActive==true
+    private fun stopIfIdle(){if(!busy())stopSelf()}
+    /** One transmission (Hub.pendingTx). Receiving pauses for it and resumes, as desktop KAT does with one HackRF. */
+    private fun transmit(name:String){
+        val request=Hub.pendingTx.getAndSet(null)?:run{stopIfIdle();return}
+        if(txJob?.isActive==true){Hub.notice.value="A transmission is already on air";return}
+        if(recording!=null){Hub.notice.value="Stop the IQ recording before transmitting";stopIfIdle();return}
+        val receiving=job?.isActive==true
+        txJob=scope.launch{
+            Hub.status.update{it.copy(transmitting=true,message="Transmitting ${request.what}…")}
+            Hub.txMessage.value="Transmitting ${request.what}…"
+            var resume=receiving
+            try{
+                // The samples first: nothing is keyed until they are ready.
+                val iq=NativeTx.iq(request.plan)
+                if(receiving){pausedForTx=true;radio?.stop();job?.cancelAndJoin()}
+                val manager=getSystemService(UsbManager::class.java)
+                val device=manager.deviceList.values.firstOrNull{it.deviceName==name&&HackRfUsb.supported(it)}?:error("HackRF is unavailable")
+                val s=Hub.settings.value
+                HackRfUsb(manager,device).use{usb->usb.transmit(iq,request.carrier,s.txVga,s.txAmp){!isActive}}
+                Hub.transmitted(request)
+            }catch(e:CancellationException){resume=false;throw e}
+            catch(e:Exception){
+                Hub.log("TX failed: ${e.message}")
+                Hub.txMessage.value="Transmission failed: ${e.message}"
+                Hub.notice.value="Transmission failed: ${e.message}"
+            }finally{
+                pausedForTx=false
+                Hub.status.update{it.copy(transmitting=false,message=Hub.txMessage.value)}
+                if(resume&&scope.isActive)startReceiver(name) else if(job?.isActive!=true)stopSelf()
+            }
+        }
     }
     private fun notification():Notification {
         val open=PendingIntent.getActivity(this,0,Intent(this,MainActivity::class.java),PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT)
@@ -116,7 +154,7 @@ class RadioService:Service() {
             catch(e:Exception){Hub.log("RX stopped: ${e.message}");Hub.notice.value=e.message?:"USB reception interrupted"}
             finally{
                 runCatching{engine?.flush()}.onFailure{Hub.log("KAT DSP finalization: ${it.message}")};engine?.close();radio=null;closeRecording();Hub.status.value=Hub.status.value.copy(running=false,message="Reception stopped",bytesPerSecond=0,recording="")
-                withContext(NonCancellable){Hub.flush()};stopSelf()
+                withContext(NonCancellable){Hub.flush()};if(!pausedForTx)stopSelf()
             }
         }
     }

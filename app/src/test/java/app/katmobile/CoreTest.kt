@@ -83,6 +83,70 @@ class CoreTest {
     @Test fun fobImportDoesNotRecomputeSavedCounterFromHistoricalPulses(){val text="""{"protocol":"Imported","frequency":433920000,"serial":42,"counter":171,"raw_pairs":[{"level":true,"duration_us":400},{"level":false,"duration_us":800}]}""";val c=StateFormat.importFob(text);assertEquals("171",c.counter);assertEquals(text,c.metadata);assertEquals("171",StateFormat.importFob(StateFormat.captureJson(c,true)).counter)}
     @Test fun jsonExportCanExcludeRawWithoutChangingMetadata(){val c=StateFormat.importFob("""{"counter":171,"raw_pairs":[{"level":true,"duration_us":400}]}""");val exported=StateFormat.captureJson(c,false);assertFalse(exported.contains("raw_pairs"));assertEquals("171",StateFormat.importFob(exported).counter);assertEquals(1,c.pulses.size)}
     @Test fun mobileCaptureJsonReimportsPulses(){val c=Capture(pulses=listOf(Pulse(true,20),Pulse(false,40)));assertEquals(c.pulses,StateFormat.importFob(StateFormat.captureJson(c,true)).pulses)}
-    @Test fun sessionMigrationRetainsDefaultSettings(){val state=StateFormat.decode("""{"settings":{"frequency":315000000},"captures":[]}""");assertEquals(315_000_000,state.settings.frequency);assertEquals(32,state.settings.lna);assertTrue(state.settings.autosave)}
+    @Test fun sessionMigrationRetainsDefaultSettings(){val state=StateFormat.decode("""{"settings":{"frequency":315000000},"captures":[{"id":"old","pulses":[]}]}""");assertEquals(315_000_000,state.settings.frequency);assertEquals(32,state.settings.lna);assertTrue(state.settings.autosave);assertEquals(47,state.settings.txVga);assertTrue(state.settings.txAmp);assertEquals("",state.captures.single().decode)}
+
+    @Test fun transmitConfigurationIsDesktopKatsAndWritesNoFirmware(){
+        val plan=Wire.txConfiguration(433_920_000,30,true)
+        assertEquals(listOf(1,6,7,16,21,17),plan.map{it.request})
+        assertEquals("transceiver off first",0,plan.first().value)
+        val lo=ByteBuffer.wrap(plan.first{it.request==16}.data).order(ByteOrder.LITTLE_ENDIAN);assertEquals(433,lo.int);assertEquals(420_000,lo.int)
+        val rate=ByteBuffer.wrap(plan.first{it.request==6}.data).order(ByteOrder.LITTLE_ENDIAN);assertEquals(2_000_000,rate.int);assertEquals(1,rate.int)
+        val filter=plan.first{it.request==7};assertEquals(1_750_000,filter.value or (filter.index shl 16))
+        val gain=plan.first{it.request==21};assertTrue(gain.input);assertEquals(30,gain.index)
+        assertEquals(1,plan.first{it.request==17}.value)
+        assertFalse(plan.any{it.request in listOf(10,11,13)})
+        assertEquals(2,Wire.transceiver(Wire.MODE_TX).value)
+        assertTrue(runCatching{Wire.txConfiguration(433_920_000,48,false)}.isFailure)
+        assertTrue(runCatching{Wire.txConfiguration(1_200_000,47,false)}.isFailure)
+    }
+
+    /** A HackRF that records what it is sent. */
+    private class FakeHackRf:TxSink{
+        val events=mutableListOf<String>();val sent=java.io.ByteArrayOutputStream();var failAt=-1;private var writes=0
+        override val capacity=4*HackRfTx.CHUNK
+        override fun write(data:ByteArray,offset:Int,length:Int){if(writes++==failAt)error("USB unplugged");events+="write $length";sent.write(data,offset,length)}
+        override fun drain(){events+="drain"}
+        fun control(c:Control){events+="control ${c.request}"+if(c.request==1)"=${c.value}" else ""}
+    }
+    @Test fun aTransmissionPrimesKeysSendsSilenceAndTurnsOff(){
+        val hackrf=FakeHackRf();val iq=ByteArray(300_000){(it%251).toByte()}
+        HackRfTx(hackrf::control,hackrf,pause={hackrf.events+="pause $it"}).send(iq,433_920_000,47,true)
+        val e=hackrf.events
+        assertEquals(listOf("control 1=0","control 6","control 7","control 16","control 21","control 17"),e.take(6))
+        val keyed=e.indexOf("control 1=2");assertEquals("keyed once",1,e.count{it=="control 1=2"})
+        assertEquals("libhackrf's order: transfers queued, then TX mode",List(4){"write 65536"},e.subList(6,keyed))
+        assertEquals(listOf("drain","pause 25","control 1=0"),e.takeLast(3))
+        val bytes=hackrf.sent.toByteArray()
+        assertArrayEquals(iq,bytes.copyOfRange(0,iq.size))
+        assertTrue("silence pushes the last samples out of the HackRF's 32 KB buffer",bytes.size-iq.size>=32768&&bytes.copyOfRange(iq.size,bytes.size).all{it==0.toByte()})
+    }
+    @Test fun aShortTransmissionIsKeyedOnceItsSamplesAreQueued(){
+        val hackrf=FakeHackRf();HackRfTx(hackrf::control,hackrf,pause={}).send(ByteArray(1000){7},315_000_000,0,false)
+        assertEquals(listOf("write 1000","control 1=2","write 65536","drain","control 1=0"),hackrf.events.drop(6))
+    }
+    @Test fun aFailedTransmissionStillTurnsTheTransmitterOff(){
+        val hackrf=FakeHackRf().apply{failAt=5}
+        val error=runCatching{HackRfTx(hackrf::control,hackrf,pause={}).send(ByteArray(600_000),433_920_000,40,false)}.exceptionOrNull()
+        assertEquals("USB unplugged",error?.message)
+        assertTrue(hackrf.events.contains("control 1=2"));assertEquals("control 1=0",hackrf.events.last())
+        val cancelled=FakeHackRf();var calls=0
+        assertTrue(runCatching{HackRfTx(cancelled::control,cancelled,pause={}).send(ByteArray(600_000),433_920_000,40,false){++calls>2}}.isFailure)
+        assertEquals("control 1=0",cancelled.events.last())
+    }
+    @Test fun txPowerIsValidatedAndImportedFromKatsConfig(){
+        assertTrue(runCatching{RadioSettings(txVga=48).validate()}.isFailure)
+        val s=StateFormat.ini("[radio]\ntx_vga_gain=30\ntx_amp=false",RadioSettings());assertEquals(30,s.txVga);assertFalse(s.txAmp)
+        assertEquals(listOf("47 dB + amp","40 dB + amp","30 dB + amp","47 dB","40 dB","30 dB","20 dB","10 dB","0 dB"),TX_POWER_STEPS.map{(g,a)->txPowerLabel(g,a)})
+    }
+    @Test fun aDecodeShowsDesktopKatsFieldsAndTravelsInTheFob(){
+        val decode="""{"protocol":"KeeLoq (DoorHan)","serial":4660,"button":2,"counter":3,"crc_valid":true,"data":"B910EF112C480004","bits":64,"encoder_capable":true,"extra":"64"}"""
+        val c=Capture(pulses=listOf(Pulse(true,400),Pulse(false,800))).withDecode(decode)
+        assertEquals(listOf("0001234","0x02","0003"),listOf(c.serial,c.button,c.counter))
+        val signal=com.google.gson.JsonParser.parseString(StateFormat.fob(c)).asJsonObject["signal"].asJsonObject
+        assertEquals("KeeLoq (DoorHan)",signal["protocol"].asString);assertEquals("B910EF112C480004",signal["data_hex"].asString)
+        assertEquals(64,signal["data_bits"].asInt);assertEquals(3,signal["counter"].asInt);assertEquals(2,signal["button"].asInt)
+        assertEquals("0001234",signal["serial"].asString);assertEquals("0000000000000064",signal["data_extra"].asString);assertTrue(signal["encoder_capable"].asBoolean)
+        assertEquals(c,c.withDecode(""))
+    }
     @Test fun iniImportOnlyAppliesReceptionAndHistoryPreferences(){val s=StateFormat.ini("[radio]\ndefault_frequency=315000000\ndefault_lna_gain=40\ndefault_vga_gain=40\n[general]\nmax_captures=0\nignore_duplicates=false\nautobf=true",RadioSettings());assertEquals(315_000_000,s.frequency);assertEquals(40,s.lna);assertEquals(2000,s.maxCaptures);assertFalse(s.ignoreDuplicates)}
 }
