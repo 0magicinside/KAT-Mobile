@@ -232,18 +232,37 @@ impl ProtocolDecoder for Compustar1wg3rDecoder {
         self.rx.feed(&mut self.decode, level, duration)
     }
 
-    fn supports_encoding(&self) -> bool { false }
+    fn supports_encoding(&self) -> bool {
+        false
+    }
 
     /// None: rtl_433 has no encoder and FoxFW's plugin refuses every key (see "Encoder").
-    fn encode(&self, _decoded: &DecodedSignal, _button: u8) -> Option<Vec<LevelDuration>> { None }
+    fn encode(&self, _decoded: &DecodedSignal, _button: u8) -> Option<Vec<LevelDuration>> {
+        None
+    }
 
     /// FoxFW's `subghz_protocol_decoder_compustar_deserialize` (`Bit: 36`), then the decoder's
     /// checks (see "Key files").
-    fn from_flipper_key(&self, key: &FlipperKey) -> Option<DecodedSignal> { None }
+    fn from_flipper_key(&self, key: &FlipperKey) -> Option<DecodedSignal> {
+        let k = key.key_u64()?;
+        if key.bits != KEY_BITS || k >> KEY_BITS != 0 {
+            return None;
+        }
+        // The 36 key bits as the first bits of a row.
+        let b: [u8; 5] = (k << 4).to_be_bytes()[3..].try_into().ok()?;
+        check_row(&b, k & 1 == 1)
+    }
 
     /// FoxFW's `subghz_protocol_decoder_common_serialize` of the frame: `Bit: 36`, `Key` = the 35
     /// frame bits and bit 35 (see "Key files").
-    fn to_flipper_key(&self, d: &DecodedSignal) -> Option<FlipperKey> { None }
+    fn to_flipper_key(&self, d: &DecodedSignal) -> Option<FlipperKey> {
+        let bit35 = match d.extra {
+            None => 0,
+            Some(1) => 1,
+            Some(_) => return None,
+        };
+        (d.data_count_bit == 35 && d.data >> 35 == 0).then(|| FlipperKey::for_protocol(FOXFW_NAME, KEY_BITS, d.data << 1 | bit35))
+    }
 }
 
 /// rtl_433's JSON for a decode (`data_print_jsons`, no `time`), for the oracle comparisons.

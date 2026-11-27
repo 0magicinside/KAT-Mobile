@@ -237,14 +237,31 @@ impl ProtocolDecoder for NeroRadioDecoder {
         None
     }
 
-    fn supports_encoding(&self) -> bool { false }
+    fn supports_encoding(&self) -> bool {
+        true
+    }
 
     /// 3 copies; a 4-bit `button` replaces bits 24..27 (ARF's D-pad; the check byte is kept).
-    fn encode(&self, decoded: &DecodedSignal, button: u8) -> Option<Vec<LevelDuration>> { None }
+    fn encode(&self, decoded: &DecodedSignal, button: u8) -> Option<Vec<LevelDuration>> {
+        let bits = decoded.data_count_bit;
+        if !bits_ok(bits) {
+            return None;
+        }
+        let mut data = decoded.data;
+        if button <= 0xF {
+            data = (data & !(0xF << BUTTON_SHIFT)) | (u64::from(button) << BUTTON_SHIFT);
+        }
+        Some(repeated(&upload(data, bits), REPEAT))
+    }
 
-    fn from_flipper_key(&self, key: &FlipperKey) -> Option<DecodedSignal> { None }
+    fn from_flipper_key(&self, key: &FlipperKey) -> Option<DecodedSignal> {
+        let (data, bits) = key_data(key, bits_ok)?;
+        Some(frame(data, bits))
+    }
 
-    fn to_flipper_key(&self, decoded: &DecodedSignal) -> Option<FlipperKey> { None }
+    fn to_flipper_key(&self, decoded: &DecodedSignal) -> Option<FlipperKey> {
+        Some(key_file(NAME, decoded))
+    }
 }
 
 #[cfg(test)]

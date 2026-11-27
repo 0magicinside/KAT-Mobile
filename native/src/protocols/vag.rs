@@ -905,9 +905,16 @@ impl ProtocolDecoder for VagDecoder {
         None
     }
 
-    fn supports_encoding(&self) -> bool { false }
+    fn supports_encoding(&self) -> bool {
+        true
+    }
 
-    fn encode(&self, decoded: &DecodedSignal, button: u8) -> Option<Vec<LevelDuration>> { None }
+    fn encode(&self, decoded: &DecodedSignal, button: u8) -> Option<Vec<LevelDuration>> {
+        let mut f = Self::encode_fields(decoded)?;
+        f.cnt = f.cnt.wrapping_add(1) & 0xFF_FFFF;
+        f.btn = Self::map_button(f.vag_type, f.btn, button);
+        Self::build(&f).map(|(upload, _, _)| Self::merge_levels(upload))
+    }
 
     /// Key files: `subghz_protocol_decoder_vag_deserialize` — Bit 80, Key = Key1, `Key2` (8 hex
     /// bytes, the low two used), `Type` read as the C does (`(uint8_t)` of the number), then
@@ -915,13 +922,85 @@ impl ProtocolDecoder for VagDecoder {
     /// a build no reference matches, spells it so; its `Type: 11011` is Type 3 to the C). The C
     /// encoder transmits from Serial/Btn/Cnt (+ KeyIdx): when those differ from the decrypted
     /// fields, KAT rebuilds Key1/Key2 from them the same way.
-    fn from_flipper_key(&self, key: &FlipperKey) -> Option<DecodedSignal> { None }
+    fn from_flipper_key(&self, key: &FlipperKey) -> Option<DecodedSignal> {
+        // A writer that left `Bit: 0` (IMPORTS/VAG/more/VAG_032.sub, which has Key, Key2, Type,
+        // Serial, Btn, Cnt and KeyIdx) loses the key in every reference: their loaders want exactly
+        // 80 bits. KAT reads it as 80 bits when the frame decrypts to the file's own Serial, Btn and
+        // Cnt; a decrypt alone is no proof (the button check passes about 49 plaintexts in 256).
+        let bit_zero = key.bits == 0;
+        if key.bits != MIN_COUNT_BIT && !bit_zero {
+            return None;
+        }
+        let key1 = key.key_u64()?;
+        let key2 = key.hex_field("Key2").or_else(|| key.hex_field("Key_2")).unwrap_or(0) as u16;
+        // A 500 µs frame is parsed as Type 3 (key 3 first, reported as Type 4), as the decoder
+        // does: the C saves the post-parse Type 4, which its own deserialize then parses strictly
+        // and rejects when the dispatch byte is not a Type 3/4 one (e.g. some IMPORTS/VAG/Golf4.sub
+        // frames).
+        let vag_type = match key.u32_field("Type").unwrap_or(0) as u8 {
+            4 => 3,
+            t => t,
+        };
+        let p = Self::parse_data(vag_type, key1, key2);
+        let d = Self::signal_from(key1, key2, &p);
+        let (serial, button, counter) = (key.u32_field("Serial"), key.u32_field("Btn"), key.u32_field("Cnt"));
+        if bit_zero
+            && !(p.decrypted
+                && serial == Some(p.serial)
+                && button == Some(u32::from(p.btn))
+                && counter.map(|c| c & 0xFF_FFFF) == Some(p.cnt))
+        {
+            return None;
+        }
+        if serial.is_none() && button.is_none() && counter.is_none() {
+            return Some(d);
+        }
+        // Flipper-ARF stores a Type 1 button as its high nibble (`dec[7] >> 4`: `Btn: 2` for
+        // 0x20); ProtoPirate and KAT keep the whole byte. Read ARF's form as the byte it means, or
+        // the frame is rebuilt around plaintext 0x02, which no key decrypts.
+        let button = button.map(|b| if p.vag_type == 1 && b < 0x10 { b << 4 } else { b });
+        let now = p.decrypted.then_some((p.serial, p.btn, p.cnt));
+        let want = (
+            serial.or(now.map(|n| n.0)),
+            button.map(|b| b as u8).or(now.map(|n| n.1)),
+            counter.map(|c| c & 0xFF_FFFF).or(now.map(|n| n.2)),
+        );
+        let (Some(serial), Some(btn), Some(cnt)) = want else { return Some(d) };
+        let f = EncodeFields {
+            vag_type: p.vag_type,
+            key_idx: key.u32_field("KeyIdx").map_or(p.key_idx, |k| k as u8),
+            type_byte: (key1 >> 56) as u8,
+            serial,
+            cnt,
+            btn,
+        };
+        if Some((serial, btn, cnt)) == now || !(1..=4).contains(&f.vag_type) {
+            return Some(d);
+        }
+        let (k1, k2) = Self::build_keys(&f)?;
+        Some(Self::signal_from(k1, k2, &Self::parse_data(f.vag_type, k1, k2)))
+    }
 
     /// Key files: `subghz_protocol_decoder_vag_serialize` — "VAG", Bit 80, Key = Key1, `Key2` (8 hex
     /// bytes, Key2 in the last two), `Type` (after parsing: 3 → 4 for key 3), and for a decrypted
     /// frame Serial, Btn, Cnt (24 bit; `pp_serialize_fields`) and `KeyIdx` (0..2, 255 = XTEA).
     /// None for a capture without Key2 (KAT ≤ 1.3 `extra` layout).
-    fn to_flipper_key(&self, decoded: &DecodedSignal) -> Option<FlipperKey> { None }
+    fn to_flipper_key(&self, decoded: &DecodedSignal) -> Option<FlipperKey> {
+        if decoded.data_count_bit != MIN_COUNT_BIT {
+            return None;
+        }
+        let (vag_type, key_idx, key2, cnt_hi) = Self::parse_extra(decoded.extra?);
+        let mut key = FlipperKey::for_protocol("VAG", MIN_COUNT_BIT, decoded.data);
+        key.push_hex("Key2", key2? as u64, 8);
+        key.push_u32("Type", vag_type.into());
+        if let (Some(serial), Some(btn), Some(cnt)) = (decoded.serial, decoded.button, decoded.counter) {
+            key.push_u32("Serial", serial);
+            key.push_u32("Btn", btn.into());
+            key.push_u32("Cnt", cnt_hi << 16 | cnt as u32);
+            key.push_u32("KeyIdx", key_idx.into());
+        }
+        Some(key)
+    }
 }
 
 impl Default for VagDecoder {

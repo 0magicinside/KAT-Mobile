@@ -236,17 +236,42 @@ impl ProtocolDecoder for HyundaiKiaRioDecoder {
         out
     }
 
-    fn supports_encoding(&self) -> bool { false }
+    fn supports_encoding(&self) -> bool {
+        true
+    }
 
     /// FoxFW's `enc_hyundai_kia_rio.c` on the key file KAT writes for `decoded` with `Btn` =
     /// `button`: the serial, the mask `button << 8` and its checksum, 3 times.
-    fn encode(&self, decoded: &DecodedSignal, button: u8) -> Option<Vec<LevelDuration>> { None }
+    fn encode(&self, decoded: &DecodedSignal, button: u8) -> Option<Vec<LevelDuration>> {
+        if decoded.data_count_bit != MIN_COUNT_BIT {
+            return None;
+        }
+        let serial = decoded.serial.unwrap_or((decoded.data >> 32) as u32);
+        Some(upload(frame(serial, button)).repeat(REPEAT))
+    }
 
     /// Any 8-byte Key at 64 bits (both C deserializers): as it is when its checksum holds and the
     /// `Serial` / `Btn` lines agree with it, else the frame FoxFW's encoder rebuilds from them.
-    fn from_flipper_key(&self, key: &FlipperKey) -> Option<DecodedSignal> { None }
+    fn from_flipper_key(&self, key: &FlipperKey) -> Option<DecodedSignal> {
+        if key.bits != MIN_COUNT_BIT {
+            return None;
+        }
+        let data = key.key_u64()?;
+        let (key_serial, key_button) = ((data >> 32) as u32, mask_to_button((data >> 16) as u16));
+        let serial = key.u32_field("Serial").unwrap_or(key_serial);
+        let button = key.u32_field("Btn").map_or(key_button, |b| b as u8);
+        match publish(data) {
+            Some(d) if (serial, button) == (key_serial, key_button) => Some(d),
+            _ => publish(frame(serial, button)),
+        }
+    }
 
-    fn to_flipper_key(&self, d: &DecodedSignal) -> Option<FlipperKey> { None }
+    fn to_flipper_key(&self, d: &DecodedSignal) -> Option<FlipperKey> {
+        let mut key = FlipperKey::for_protocol(NAME, d.data_count_bit, d.data);
+        key.push_u32("Serial", d.serial?);
+        key.push_u32("Btn", u32::from(d.button?));
+        Some(key)
+    }
 }
 
 #[cfg(test)]

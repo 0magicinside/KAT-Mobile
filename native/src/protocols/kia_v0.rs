@@ -743,9 +743,13 @@ impl ProtocolDecoder for KiaV0Decoder {
         None
     }
 
-    fn supports_encoding(&self) -> bool { false }
+    fn supports_encoding(&self) -> bool {
+        true
+    }
 
-    fn encode(&self, decoded: &DecodedSignal, button: u8) -> Option<Vec<LevelDuration>> { None }
+    fn encode(&self, decoded: &DecodedSignal, button: u8) -> Option<Vec<LevelDuration>> {
+        encode_type(decoded, Request::Button(button), KiaV0Type::from_bits(decoded.data_count_bit)?)
+    }
 
     /// "Send next code": the captured button (the types' codes overlap KAT's generic ones).
     fn encode_next(&self, decoded: &DecodedSignal) -> Option<Vec<LevelDuration>> {
@@ -758,12 +762,52 @@ impl ProtocolDecoder for KiaV0Decoder {
     /// recomputed); KAT does that only when they differ from the key's own fields, so a key it
     /// wrote reloads bit for bit (the C's rebuild would also clear the sync bit the decoder leaves
     /// in bit 60 of a Kia frame — same fields, same frame on air).
-    fn from_flipper_key(&self, key: &FlipperKey) -> Option<DecodedSignal> { None }
+    fn from_flipper_key(&self, key: &FlipperKey) -> Option<DecodedSignal> {
+        let by_bits = KiaV0Type::from_bits(key.bits)?;
+        let ty = match key.u32_field("Type") {
+            Some(1) => KiaV0Type::Kia,
+            Some(2) => KiaV0Type::Suzuki,
+            Some(3) => KiaV0Type::Honda,
+            Some(4) => KiaV0Type::Mitsubishi,
+            _ => type_from_protocol_name(&key.protocol).unwrap_or(by_bits),
+        };
+        let mut data = key.key_u64()?;
+        let f = parse_fields(data, ty);
+        let (serial, button, counter) = (key.u32_field("Serial"), key.u32_field("Btn"), key.u32_field("Cnt"));
+        if serial.is_some() || button.is_some() || counter.is_some() {
+            let serial = serial.unwrap_or(f.serial);
+            let button = button.map_or(f.button, |b| b as u8);
+            let counter = counter.map_or(f.counter, |c| c as u16);
+            let mask = if ty == KiaV0Type::Honda { 0x07 } else { 0x0F };
+            let edited = (serial, button & mask, counter) != (f.serial, f.button, f.counter);
+            if edited {
+                data = build_frame(ty, serial, button & mask, counter);
+            }
+        }
+        Some(signal(data, ty))
+    }
 
     /// `subghz_protocol_decoder_kia_serialize`: Protocol "Kia V0" for every type (the C's
     /// `generic.protocol_name`), Bit 61/64/72, Key = the frame, then `pp_serialize_fields`'
     /// Serial, Btn, Cnt and Type (1 Kia, 2 Suzuki, 3 Honda, 4 Mitsubishi), decimal.
-    fn to_flipper_key(&self, decoded: &DecodedSignal) -> Option<FlipperKey> { None }
+    fn to_flipper_key(&self, decoded: &DecodedSignal) -> Option<FlipperKey> {
+        let ty = match decoded.protocol_display_name.as_deref().map(super::info::strip_variant) {
+            Some("Suzuki V0") => KiaV0Type::Suzuki,
+            Some("Honda V0") => KiaV0Type::Honda,
+            Some("Mitsubishi V0") => KiaV0Type::Mitsubishi,
+            _ => KiaV0Type::from_bits(decoded.data_count_bit)?,
+        };
+        if ty.bit_count() != decoded.data_count_bit {
+            return None;
+        }
+        let f = parse_fields(decoded.data, ty);
+        let mut key = FlipperKey::for_protocol("Kia V0", ty.bit_count(), decoded.data);
+        key.push_u32("Serial", f.serial);
+        key.push_u32("Btn", f.button.into());
+        key.push_u32("Cnt", f.counter.into());
+        key.push_u32("Type", ty as u32);
+        Some(key)
+    }
 }
 
 /// `kia_v0_type_from_protocol_name`: the type a legacy / display Protocol name stands for.

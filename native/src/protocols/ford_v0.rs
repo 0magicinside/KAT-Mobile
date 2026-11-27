@@ -662,21 +662,91 @@ impl ProtocolDecoder for FordV0Decoder {
         None
     }
 
-    fn supports_encoding(&self) -> bool { false }
+    fn supports_encoding(&self) -> bool {
+        true
+    }
 
-    fn encode(&self, decoded: &DecodedSignal, button: u8) -> Option<Vec<LevelDuration>> { None }
+    fn encode(&self, decoded: &DecodedSignal, button: u8) -> Option<Vec<LevelDuration>> {
+        let serial = decoded.serial?;
+
+        // The captured counter + 1: the emulate scene writes Cnt = counter + 1 (unmasked, as the C;
+        // ARF/doctor add the rolling multiplier). With key2 in `extra`, recover the full 19-bit
+        // counter and the captured button field from the frame itself; otherwise fall back to the
+        // 16-bit counter / reported button.
+        let (count, captured_field) = match decoded.extra {
+            Some(key2) => {
+                let fields = Self::decode_ford_v0(decoded.data, key2 as u16);
+                (fields.count, fields.button_field)
+            }
+            None => (
+                decoded.counter.unwrap_or(0) as u32,
+                Self::button_to_field(decoded.button.unwrap_or(0)),
+            ),
+        };
+
+        // Kept within the 19 counter bits (the C would spill a carry out of 0x7FFFF into the
+        // button field's low bit and the checksum).
+        let count = count.wrapping_add(1) & 0x7_FFFF;
+
+        // KAT generic Lock/Unlock/Trunk/Panic → button field; anything else keeps the captured one.
+        let button_field = match button {
+            0x01 | 0x02 | 0x04 | 0x08 => Self::button_to_field(button),
+            _ => captured_field,
+        };
+
+        // Checksum (BS) from serial + count + button (matches ford_v0_calculate_checksum in C)
+        let checksum = Self::calculate_checksum(serial, count, button_field);
+
+        // Header byte from the original key1 (first byte)
+        let header_byte = (decoded.data >> 56) as u8;
+
+        let new_key1 = Self::encode_ford_v0(header_byte, serial, button_field, count, checksum);
+
+        // key2 = checksum << 8 | (CRC ^ 0x80)
+        let crc = Self::calculate_crc_for_tx(new_key1, checksum);
+        let new_key2 = ((checksum as u16) << 8) | (crc as u16);
+
+        // One 6-burst block (the C's encoder.repeat replays it; KAT sends it TX_REPEAT times).
+        let single = Self::build_upload(new_key1, new_key2);
+        let mut signal = Vec::with_capacity(single.len() * TX_REPEAT);
+        for _ in 0..TX_REPEAT {
+            signal.extend_from_slice(&single);
+        }
+        Some(signal)
+    }
 
     /// `subghz_protocol_decoder_ford_v0_deserialize`: Bit must be 64; key1 = Key, key2 =
     /// Checksum << 8 | CRC (0 when missing, as the C reads them). The fields are decoded from the
     /// frame, as KAT's decoder reports them (the C displays the file's Serial/Btn/Cnt, which are
     /// the frame's own in every file it writes). A frame the C saved with a bad CRC loads with
     /// `crc_valid` false.
-    fn from_flipper_key(&self, key: &FlipperKey) -> Option<DecodedSignal> { None }
+    fn from_flipper_key(&self, key: &FlipperKey) -> Option<DecodedSignal> {
+        if key.bits != MIN_COUNT_BIT {
+            return None;
+        }
+        let key1 = key.key_u64()?;
+        let checksum = key.u32_field("Checksum").unwrap_or(0) & 0xFF;
+        let crc = key.u32_field("CRC").unwrap_or(0) & 0xFF;
+        Some(Self::key_signal(key1, ((checksum << 8) | crc) as u16))
+    }
 
     /// `subghz_protocol_decoder_ford_v0_serialize`: "Ford V0", Bit 64, Key = key1, Checksum and
     /// CRC (key2's two bytes, decimal), then `pp_serialize_fields`' Serial, Btn (the C's 4-bit
     /// button field) and Cnt (19-bit counter). Needs key2 (`extra`).
-    fn to_flipper_key(&self, decoded: &DecodedSignal) -> Option<FlipperKey> { None }
+    fn to_flipper_key(&self, decoded: &DecodedSignal) -> Option<FlipperKey> {
+        if decoded.data_count_bit != MIN_COUNT_BIT {
+            return None;
+        }
+        let key2 = u16::try_from(decoded.extra?).ok()?;
+        let fields = Self::decode_ford_v0(decoded.data, key2);
+        let mut key = FlipperKey::for_protocol("Ford V0", MIN_COUNT_BIT, decoded.data);
+        key.push_u32("Checksum", (key2 >> 8).into());
+        key.push_u32("CRC", (key2 & 0xFF).into());
+        key.push_u32("Serial", fields.serial);
+        key.push_u32("Btn", (fields.button_field & 0x0F).into());
+        key.push_u32("Cnt", fields.count);
+        Some(key)
+    }
 }
 
 impl Default for FordV0Decoder {

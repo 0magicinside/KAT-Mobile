@@ -174,18 +174,39 @@ impl ProtocolDecoder for TeslaChargeDecoder {
         None
     }
 
-    fn supports_encoding(&self) -> bool { false }
+    fn supports_encoding(&self) -> bool {
+        true
+    }
 
     /// FoxFW's `enc_tesla_charge.c`: the code at the key's `TE`, 5 times. There is no button, so
     /// `button` changes nothing.
-    fn encode(&self, decoded: &DecodedSignal, _button: u8) -> Option<Vec<LevelDuration>> { None }
+    fn encode(&self, decoded: &DecodedSignal, _button: u8) -> Option<Vec<LevelDuration>> {
+        if decoded.data_count_bit != MIN_COUNT_BIT {
+            return None;
+        }
+        let te = match decoded.extra {
+            None => TE_SHORT,
+            Some(te) => u32::try_from(te).ok()?,
+        };
+        Some(upload(decoded.data, te).repeat(REPEAT))
+    }
 
     /// The C's `deserialize` (decoder and encoder): exactly 50 bits, any Key; `TE` as the encoder
     /// reads it.
-    fn from_flipper_key(&self, key: &FlipperKey) -> Option<DecodedSignal> { None }
+    fn from_flipper_key(&self, key: &FlipperKey) -> Option<DecodedSignal> {
+        if key.bits != MIN_COUNT_BIT {
+            return None;
+        }
+        let te = key.u32_field("TE").filter(|&te| te != 0).unwrap_or(TE_SHORT);
+        Some(signal(key.key_u64()?, te))
+    }
 
     /// The decoder's `serialize`: the generic block plus `TE` (the loaded key's, else 400).
-    fn to_flipper_key(&self, d: &DecodedSignal) -> Option<FlipperKey> { None }
+    fn to_flipper_key(&self, d: &DecodedSignal) -> Option<FlipperKey> {
+        let mut key = FlipperKey::for_protocol(NAME, d.data_count_bit, d.data);
+        key.push_u32("TE", d.extra.map_or(TE_SHORT, |te| te as u32));
+        Some(key)
+    }
 }
 
 #[cfg(test)]

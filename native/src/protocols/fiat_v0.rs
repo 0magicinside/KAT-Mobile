@@ -332,17 +332,77 @@ impl ProtocolDecoder for FiatV0Decoder {
         None
     }
 
-    fn supports_encoding(&self) -> bool { false }
+    fn supports_encoding(&self) -> bool {
+        true
+    }
 
     /// Byte-exact replay of the captured frame (the requested button is ignored, as in the C).
-    fn encode(&self, decoded: &DecodedSignal, _button: u8) -> Option<Vec<LevelDuration>> { None }
+    fn encode(&self, decoded: &DecodedSignal, _button: u8) -> Option<Vec<LevelDuration>> {
+        let serial = decoded.serial?;
+        let hop = (decoded.data >> 32) as u32;
+        // C: data = (hop << 32) | fix; endbyte_to_send = endbyte >> 1 (6 tail bits).
+        let data = ((hop as u64) << 32) | (serial as u64);
+        let tail = (decoded.button.unwrap_or(0) >> 1) & 0x3F;
+        let bits = (0..64)
+            .rev()
+            .map(|bit| (data >> bit) & 1 == 1)
+            .chain((0..TAIL_BITS).rev().map(|bit| (tail >> bit) & 1 == 1));
+
+        let mut signal = Vec::with_capacity(1024);
+        for burst in 0..TOTAL_BURSTS {
+            if burst > 0 {
+                Self::add_level(&mut signal, false, INTER_BURST_GAP);
+            }
+
+            // Preamble: alternating short pulses; the last LOW becomes the 800µs gap.
+            for _ in 0..PREAMBLE_PAIRS - 1 {
+                Self::add_level(&mut signal, true, TE_SHORT);
+                Self::add_level(&mut signal, false, TE_SHORT);
+            }
+            Self::add_level(&mut signal, true, TE_SHORT);
+            Self::add_level(&mut signal, false, GAP_US);
+
+            // Short HIGH, then every bit as a transition from an implied leading 1 (see the module
+            // doc: for a first bit of 0 this is exactly the C's "H short, L long").
+            Self::add_level(&mut signal, true, TE_SHORT);
+            let mut prev_bit = true;
+            for curr_bit in bits.clone() {
+                Self::add_transition(&mut signal, prev_bit, curr_bit);
+                prev_bit = curr_bit;
+            }
+
+            if prev_bit {
+                Self::add_level(&mut signal, false, TE_SHORT);
+            }
+            // End marker: te_short * 8 LOW (matches C)
+            Self::add_level(&mut signal, false, TE_SHORT * 8);
+        }
+
+        Some(signal)
+    }
 
     /// ProtoPirate's encoder / doctor-firmware's decoder `deserialize` (see the module doc): Bit
     /// 64 or 71, fix/hop from the Key, the tail from EndByte, CRC or Btn (masked to 7 bits).
-    fn from_flipper_key(&self, key: &FlipperKey) -> Option<DecodedSignal> { None }
+    fn from_flipper_key(&self, key: &FlipperKey) -> Option<DecodedSignal> {
+        if key.bits != 64 && key.bits != FRAME_BITS as usize {
+            return None;
+        }
+        let data = key.key_u64()?;
+        let tail = ["EndByte", "CRC", "Btn"].iter().find_map(|f| key.u32_field(f)).unwrap_or(0);
+        Some(signal(data, (tail & 0x7F) as u8))
+    }
 
     /// `subghz_protocol_decoder_fiat_v0_serialize` (see the module doc).
-    fn to_flipper_key(&self, decoded: &DecodedSignal) -> Option<FlipperKey> { None }
+    fn to_flipper_key(&self, decoded: &DecodedSignal) -> Option<FlipperKey> {
+        let endbyte = decoded.button.unwrap_or(0) & 0x7F;
+        let mut key = FlipperKey::for_protocol("Fiat V0", FRAME_BITS as usize, decoded.data);
+        key.push_u32("Serial", decoded.data as u32);
+        key.push_u32("Btn", endbyte.into());
+        key.push_u32("Cnt", (decoded.data >> 32) as u32);
+        key.push_u32("EndByte", endbyte.into());
+        key.push("Disp", format!("Fiat V0 - {}", display_suffix(endbyte)));
+        Some(key)
+    }
 }
 
 impl Default for FiatV0Decoder {

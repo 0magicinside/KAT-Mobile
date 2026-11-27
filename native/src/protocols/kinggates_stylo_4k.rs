@@ -347,13 +347,44 @@ impl ProtocolDecoder for KingGatesStylo4kDecoder {
         None
     }
 
-    fn supports_encoding(&self) -> bool { false }
+    fn supports_encoding(&self) -> bool {
+        true
+    }
 
-    fn encode(&self, decoded: &DecodedSignal, button: u8) -> Option<Vec<LevelDuration>> { None }
+    fn encode(&self, decoded: &DecodedSignal, button: u8) -> Option<Vec<LevelDuration>> {
+        if decoded.data_count_bit != MIN_COUNT_BIT {
+            return None;
+        }
+        let (fix53, hop36) = unpack(decoded.data, decoded.extra?);
+        let f = analyze(fix53, hop36)?;
+        let btn = if button <= 0x0F { button } else { f.btn };
+        let cnt = next_counter(u32::from(f.cnt), 0xFFFF) as u16;
+        let (fix53, hop36) = gen_data(f.serial, btn, cnt)?;
+        let mut out = Vec::with_capacity(TX_REPEAT * 204);
+        for _ in 0..TX_REPEAT {
+            upload_once(fix53, hop36, &mut out);
+        }
+        Some(out)
+    }
 
-    fn from_flipper_key(&self, key: &FlipperKey) -> Option<DecodedSignal> { None }
+    fn from_flipper_key(&self, key: &FlipperKey) -> Option<DecodedSignal> {
+        // `subghz_protocol_decoder_kinggates_stylo_4k_deserialize`: Bit must be 89, Key + Data.
+        if key.bits != MIN_COUNT_BIT {
+            return None;
+        }
+        signal(key8(key)? & FIX_MASK, hex8_field(key, "Data")? & HOP_MASK)
+    }
 
-    fn to_flipper_key(&self, decoded: &DecodedSignal) -> Option<FlipperKey> { None }
+    fn to_flipper_key(&self, decoded: &DecodedSignal) -> Option<FlipperKey> {
+        if decoded.data_count_bit != MIN_COUNT_BIT {
+            return None;
+        }
+        // `..._serialize`: generic block (Key = the fix) + "Data" = the hop part.
+        let (fix53, hop36) = unpack(decoded.data, decoded.extra?);
+        let mut k = FlipperKey::new(NAME, MIN_COUNT_BIT, fix53, 0, "");
+        k.push_hex("Data", hop36, 8);
+        Some(k)
+    }
 }
 
 /// A key file for a random valid frame (oracle driver fixtures).

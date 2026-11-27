@@ -314,15 +314,51 @@ impl ProtocolDecoder for GmDecoder {
         }
     }
 
-    fn supports_encoding(&self) -> bool { false }
+    fn supports_encoding(&self) -> bool {
+        true
+    }
 
-    fn encode(&self, decoded: &DecodedSignal, _button: u8) -> Option<Vec<LevelDuration>> { None }
+    fn encode(&self, decoded: &DecodedSignal, _button: u8) -> Option<Vec<LevelDuration>> {
+        // Replay only (as in the C): the requested button is ignored.
+        let raw = Self::frame_from_signal(decoded)?;
+        if !Self::frame_valid(&raw) {
+            return None;
+        }
+        let mut signal = Vec::with_capacity(WIRE_BITS * 2 + 2);
+        for bit_index in 0..WIRE_BITS {
+            let bit = (raw[bit_index >> 3] >> (7 - (bit_index & 7))) & 1 != 0;
+            signal.push(LevelDuration::new(true, TE_SHORT));
+            signal.push(LevelDuration::new(
+                false,
+                if bit { TE_LONG } else { TE_SHORT },
+            ));
+        }
+        // KAT deviation: closing pulse so the 112th gap is delimited (see module docs).
+        signal.push(LevelDuration::new(true, TE_SHORT));
+        signal.push(LevelDuration::new(false, RESET_US));
+        Some(signal)
+    }
 
     /// `subghz_protocol_decoder_gm_deserialize`: Bit 112 and a valid 14-byte `Data` line.
-    fn from_flipper_key(&self, key: &FlipperKey) -> Option<DecodedSignal> { None }
+    fn from_flipper_key(&self, key: &FlipperKey) -> Option<DecodedSignal> {
+        if key.bits != WIRE_BITS {
+            return None;
+        }
+        let raw: [u8; WIRE_BYTES] = key.hex_bytes_field("Data")?.try_into().ok()?;
+        Self::frame_valid(&raw).then(|| Self::signal_from_frame(&raw))
+    }
 
     /// `subghz_protocol_decoder_gm_serialize`: Key (`id << 16 | seq16`), Data, Serial, Btn, Cnt.
-    fn to_flipper_key(&self, decoded: &DecodedSignal) -> Option<FlipperKey> { None }
+    fn to_flipper_key(&self, decoded: &DecodedSignal) -> Option<FlipperKey> {
+        let raw = Self::frame_from_signal(decoded)?;
+        let (serial, button, cnt) = (Self::id(&raw), Self::button(&raw), Self::sequence(&raw) & 0xFFFF);
+        let mut key = FlipperKey::for_protocol("GM", WIRE_BITS, (u64::from(serial) << 16) | u64::from(cnt));
+        key.push_hex_bytes("Data", &raw);
+        key.push_u32("Serial", serial);
+        key.push_u32("Btn", button.into());
+        key.push_u32("Cnt", cnt);
+        Some(key)
+    }
 }
 
 impl Default for GmDecoder {

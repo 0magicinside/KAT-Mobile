@@ -199,13 +199,29 @@ impl ProtocolDecoder for AllstarFireflyDecoder {
         None
     }
 
-    fn supports_encoding(&self) -> bool { false }
+    fn supports_encoding(&self) -> bool {
+        true
+    }
 
-    fn encode(&self, decoded: &DecodedSignal, _button: u8) -> Option<Vec<LevelDuration>> { None }
+    fn encode(&self, decoded: &DecodedSignal, _button: u8) -> Option<Vec<LevelDuration>> {
+        (decoded.data_count_bit == BIT_COUNT).then(|| repeat_upload(&upload(decoded.data), REPEAT))
+    }
 
-    fn from_flipper_key(&self, key: &FlipperKey) -> Option<DecodedSignal> { None }
+    fn from_flipper_key(&self, key: &FlipperKey) -> Option<DecodedSignal> {
+        (key.bits == BIT_COUNT).then(|| signal(key.key))
+    }
 
-    fn to_flipper_key(&self, decoded: &DecodedSignal) -> Option<FlipperKey> { None }
+    fn to_flipper_key(&self, decoded: &DecodedSignal) -> Option<FlipperKey> {
+        (decoded.data_count_bit == BIT_COUNT).then(|| {
+            FlipperKey::new(
+                "Allstar Firefly",
+                BIT_COUNT,
+                decoded.data,
+                318_000_000,
+                "FuriHalSubGhzPresetOok650Async",
+            )
+        })
+    }
 }
 
 #[cfg(test)]

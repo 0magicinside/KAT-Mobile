@@ -190,14 +190,31 @@ impl ProtocolDecoder for Marantec24Decoder {
         None
     }
 
-    fn supports_encoding(&self) -> bool { false }
+    fn supports_encoding(&self) -> bool {
+        true
+    }
 
     /// 3 copies of the 24-bit key; a 4-bit `button` replaces the button nibble (ARF's D-pad).
-    fn encode(&self, decoded: &DecodedSignal, button: u8) -> Option<Vec<LevelDuration>> { None }
+    fn encode(&self, decoded: &DecodedSignal, button: u8) -> Option<Vec<LevelDuration>> {
+        if decoded.data_count_bit != MIN_COUNT_BIT {
+            return None;
+        }
+        let data = if button <= 0xF {
+            (decoded.data & !0xF) | u64::from(button)
+        } else {
+            decoded.data
+        };
+        Some(repeated(&upload(data), REPEAT))
+    }
 
-    fn from_flipper_key(&self, key: &FlipperKey) -> Option<DecodedSignal> { None }
+    fn from_flipper_key(&self, key: &FlipperKey) -> Option<DecodedSignal> {
+        let (data, _) = key_data(key, |bits| bits == MIN_COUNT_BIT)?;
+        Some(frame(data))
+    }
 
-    fn to_flipper_key(&self, decoded: &DecodedSignal) -> Option<FlipperKey> { None }
+    fn to_flipper_key(&self, decoded: &DecodedSignal) -> Option<FlipperKey> {
+        Some(key_file(NAME, decoded))
+    }
 }
 
 #[cfg(test)]

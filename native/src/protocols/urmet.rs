@@ -492,15 +492,51 @@ impl ProtocolDecoder for UrmetDecoder {
         None
     }
 
-    fn supports_encoding(&self) -> bool { false }
+    fn supports_encoding(&self) -> bool {
+        false
+    }
 
-    fn encode(&self, _decoded: &DecodedSignal, _button: u8) -> Option<Vec<LevelDuration>> { None }
+    fn encode(&self, _decoded: &DecodedSignal, _button: u8) -> Option<Vec<LevelDuration>> {
+        None
+    }
 
-    fn from_flipper_key(&self, key: &FlipperKey) -> Option<DecodedSignal> { None }
+    fn from_flipper_key(&self, key: &FlipperKey) -> Option<DecodedSignal> {
+        // urmet_load_from_ff: Raw (all bytes) when present, else Bit/8 bytes of Key (the
+        // reference zero-fills past the 8 Key bytes); then Gaps (or gaps rebuilt from the
+        // bytes) must give ≥ 2 gaps — true for any 16..40-byte frame.
+        let bytes = match key.field("Raw") {
+            Some(raw) => super::flipper_key::parse_hex_vec(raw)?,
+            None => {
+                let bits = key.bits;
+                if !(URMET_MIN_BYTES * 8..=URMET_MAX_BYTES * 8).contains(&bits)
+                    || !bits.is_multiple_of(8)
+                {
+                    return None;
+                }
+                let mut v = vec![0u8; bits / 8];
+                v[..8].copy_from_slice(&key.key.to_be_bytes());
+                v
+            }
+        };
+        if !(URMET_MIN_BYTES..=URMET_MAX_BYTES).contains(&bytes.len()) {
+            return None;
+        }
+        if let Some(gaps) = key.field("Gaps") {
+            let gaps = super::flipper_key::parse_hex_vec(gaps)?;
+            if gaps.len() < 2 || gaps.len() > URMET_MAX_GAPS {
+                return None;
+            }
+        }
+        Some(signal(&bytes))
+    }
 
-    fn key_file_pulses(&self, key: &FlipperKey) -> Option<Vec<LevelDuration>> { None }
+    fn key_file_pulses(&self, key: &FlipperKey) -> Option<Vec<LevelDuration>> {
+        frame_from_key(key).map(|(_, gaps)| upload(&gaps))
+    }
 
-    fn key_file_from_pulses(&self, pulses: &[LevelDuration]) -> Option<FlipperKey> { None }
+    fn key_file_from_pulses(&self, pulses: &[LevelDuration]) -> Option<FlipperKey> {
+        frame_from_pulses(pulses).map(|(bytes, gaps)| key_file(&bytes, &gaps))
+    }
 }
 
 #[cfg(test)]

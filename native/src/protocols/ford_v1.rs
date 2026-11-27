@@ -665,15 +665,103 @@ impl ProtocolDecoder for FordV1Decoder {
         None
     }
 
-    fn supports_encoding(&self) -> bool { false }
+    fn supports_encoding(&self) -> bool {
+        true
+    }
 
-    fn encode(&self, decoded: &DecodedSignal, button: u8) -> Option<Vec<LevelDuration>> { None }
+    fn encode(&self, decoded: &DecodedSignal, button: u8) -> Option<Vec<LevelDuration>> {
+        if decoded.data_count_bit != DATA_BITS {
+            return None;
+        }
+        let extra = decoded.extra?;
+        let key2 = Self::legacy_key2(decoded, extra).unwrap_or(extra);
+        // ford_v1_keys_file_to_canonical_raw: the C refuses frames whose plaintext cannot be
+        // recovered (encryption_supported / plain_valid).
+        let (raw, plain, strict) = Self::extract_plain(&Self::frame_from_keys(decoded.data, key2))?;
+        // A JLR frame (strict fails): the car key gives its next code; without the key, refuse (the UI
+        // then offers Replay only). A strict Ford frame re-encodes the Ford way below.
+        if !strict {
+            return Self::encode_jlr(decoded, button);
+        }
+        // The file's Serial/Btn/Cnt as the C decoder saved them (the plaintext fields), overridden
+        // by the DecodedSignal fields.
+        let (frame_serial, frame_btn, frame_cnt) = Self::fields_from_plain(&plain);
+        let serial = decoded.serial.unwrap_or(frame_serial);
+        let captured = decoded.button.unwrap_or(frame_btn);
+        let cnt = match decoded.counter {
+            Some(low) => (frame_cnt & 0xF_0000) | low as u32,
+            None => frame_cnt,
+        };
+        let btn = Self::map_button(button, captured);
+        let cnt = cnt.wrapping_add(1) & COUNTER_MASK;
+
+        let mut plain = plain;
+        Self::plain_apply_fields(&mut plain, serial, btn, cnt);
+        let mut raw_tx = raw;
+        Self::rebuild_raw_from_plain(&mut raw_tx, &plain);
+        Some(Self::build_burst0(&raw_tx))
+    }
 
     /// `subghz_protocol_decoder_ford_v1_deserialize` (see the module doc, "Key files").
-    fn from_flipper_key(&self, key: &FlipperKey) -> Option<DecodedSignal> { None }
+    fn from_flipper_key(&self, key: &FlipperKey) -> Option<DecodedSignal> {
+        if key.bits != DATA_BITS {
+            return None;
+        }
+        let key1 = key.key_u64()?;
+        let key2: [u8; 8] = key.hex_bytes_field("Key_2")?.try_into().ok()?;
+        let key2 = u64::from_be_bytes(key2);
+        let crc16 = key
+            .hex_bytes_field("Key_3")
+            .and_then(|b| <[u8; 4]>::try_from(b).ok())
+            .map_or(0, |b| Self::crc16_from_key3(&b));
+        let (serial, btn, cnt) = (key.u32_field("Serial")?, key.u32_field("Btn")?, key.u32_field("Cnt")?);
+        // ford_v1_keys_file_to_canonical_raw: as written, then the legacy halves-swapped keys.
+        let attempts = [
+            (key1, key2),
+            (Self::legacy_halves_bswap(key1), Self::legacy_halves_bswap(key2)),
+        ];
+        for (k1, k2) in attempts {
+            let raw = Self::frame_from_file(k1, k2, crc16);
+            if Self::extract_plain(&raw).is_some() {
+                return Self::process_data(&raw);
+            }
+        }
+        // No plaintext: the frame as the decoder reports it when its CRC holds, else the C's
+        // "CRC ERR" view of the file.
+        Self::process_data(&Self::frame_from_file(key1, key2, crc16)).or(Some(DecodedSignal {
+            serial: Some(serial),
+            button: Some(btn as u8),
+            counter: Some(cnt as u16),
+            crc_valid: false,
+            data: key1,
+            data_count_bit: DATA_BITS,
+            encoder_capable: false,
+            extra: Some(key2),
+            protocol_display_name: None,
+        }))
+    }
 
     /// `subghz_protocol_decoder_ford_v1_serialize` (see the module doc, "Key files").
-    fn to_flipper_key(&self, decoded: &DecodedSignal) -> Option<FlipperKey> { None }
+    fn to_flipper_key(&self, decoded: &DecodedSignal) -> Option<FlipperKey> {
+        if decoded.data_count_bit != DATA_BITS || decoded.data >> 56 != 0 {
+            return None;
+        }
+        let extra = decoded.extra?;
+        let key2 = Self::legacy_key2(decoded, extra).unwrap_or(extra);
+        // The C's `crc_calc` is the CRC16 recomputed over the (canonical) frame.
+        let raw = Self::frame_from_keys(decoded.data, key2);
+        let (serial, btn, cnt) = match Self::strict_plain(&raw) {
+            Some(plain) => Self::fields_from_plain(&plain),
+            None => (u32::from_be_bytes([raw[3], raw[4], raw[5], raw[6]]), 0, 0),
+        };
+        let mut key = FlipperKey::for_protocol("Ford V1", DATA_BITS, decoded.data);
+        key.push_u32("Serial", serial);
+        key.push_u32("Btn", btn.into());
+        key.push_u32("Cnt", cnt);
+        key.push_hex("Key_2", key2, 8);
+        key.push_hex_bytes("Key_3", &[0, 0, raw[15], raw[16]]);
+        Some(key)
+    }
 }
 
 impl Default for FordV1Decoder {

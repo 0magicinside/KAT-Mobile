@@ -301,10 +301,18 @@ impl ProtocolDecoder for MazdaV1Decoder {
         Some("Mazda V2")
     }
 
-    fn supports_encoding(&self) -> bool { false }
+    fn supports_encoding(&self) -> bool {
+        true
+    }
 
     /// The captured frame again, as it is, in Mazda V2's upload (module doc, "Transmit").
-    fn encode(&self, decoded: &DecodedSignal, _button: u8) -> Option<Vec<LevelDuration>> { None }
+    fn encode(&self, decoded: &DecodedSignal, _button: u8) -> Option<Vec<LevelDuration>> {
+        if decoded.data_count_bit != FRAME_BITS || (decoded.data >> 56) as u8 != 0xEC {
+            return None;
+        }
+        let tail = decoded.extra.filter(|t| *t < 1 << (FRAME_BITS - 64))?;
+        Some(super::mazda_v2::replay_upload(((decoded.data & 0x00FF_FFFF_FFFF_FFFF) << 7) | tail))
+    }
 }
 
 #[cfg(test)]

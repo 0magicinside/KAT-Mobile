@@ -171,20 +171,50 @@ impl ProtocolDecoder for AlpsFwb1u545Decoder {
         self.rx.feed(&mut self.decode, level, duration)
     }
 
-    fn supports_encoding(&self) -> bool { false }
+    fn supports_encoding(&self) -> bool {
+        false
+    }
 
     /// None: rtl_433 has no encoder and FoxFW's plugin refuses every key (see "Encoder").
-    fn encode(&self, _decoded: &DecodedSignal, _button: u8) -> Option<Vec<LevelDuration>> { None }
+    fn encode(&self, _decoded: &DecodedSignal, _button: u8) -> Option<Vec<LevelDuration>> {
+        None
+    }
 
     /// FoxFW's `subghz_protocol_decoder_alps_rke_deserialize` (`Bit: 76`), then the decoder's checks
     /// on KAT's `Raw` line, which must hold the key as bytes 1–8, or, without it (FoxFW's own files),
     /// on the frame rebuilt with the 0x55 byte and the unknown bits 0 (see "Key files").
-    fn from_flipper_key(&self, key: &FlipperKey) -> Option<DecodedSignal> { None }
+    fn from_flipper_key(&self, key: &FlipperKey) -> Option<DecodedSignal> {
+        if key.bits != BITS {
+            return None;
+        }
+        let k = key.key_u64()?.to_be_bytes();
+        if key.field("Raw").is_some() {
+            let raw: [u8; 10] = key.hex_bytes_field("Raw")?.try_into().ok()?;
+            return (raw[1..9] == k && raw[9] & 0x0F == 0).then(|| check(&raw)).flatten();
+        }
+        let mut b = [0u8; 10];
+        b[0] = 0x55;
+        b[1..9].copy_from_slice(&k);
+        check(&b)
+    }
 
     /// FoxFW's `subghz_protocol_decoder_common_serialize` of the frame (`Bit: 76`, `Key` = bytes
     /// 1–8: `id << 32 | button byte << 24 | copy << 16 | sequence`), then `Raw` = the frame's 10
     /// bytes (KAT's line, see "Key files"). None for a decode the checks refuse (it would not load).
-    fn to_flipper_key(&self, d: &DecodedSignal) -> Option<FlipperKey> { None }
+    fn to_flipper_key(&self, d: &DecodedSignal) -> Option<FlipperKey> {
+        let extra = d.extra?;
+        if d.data_count_bit != BITS || d.data >> 56 != 0x55 || extra >> 12 != 0 {
+            return None;
+        }
+        let mut raw = [0u8; 10];
+        raw[..8].copy_from_slice(&d.data.to_be_bytes());
+        raw[8] = (extra >> 4) as u8;
+        raw[9] = ((extra & 0xF) << 4) as u8;
+        check(&raw)?;
+        let mut key = FlipperKey::for_protocol(FOXFW_NAME, BITS, d.data << 8 | extra >> 4);
+        key.push_hex_bytes("Raw", &raw);
+        Some(key)
+    }
 }
 
 /// rtl_433's JSON for a decode (`data_print_jsons`, no `time`), for the oracle comparisons.

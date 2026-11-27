@@ -269,19 +269,47 @@ impl ProtocolDecoder for BmwCas3Decoder {
         None
     }
 
-    fn supports_encoding(&self) -> bool { false }
+    fn supports_encoding(&self) -> bool {
+        true
+    }
 
     /// FoxFW `enc_bmw_cas3.c`: the captured bits as they are, whatever `button` asks (the payload
     /// is AES-encrypted; the C replays it and changes nothing), 3 times back to back.
-    fn encode(&self, decoded: &DecodedSignal, _button: u8) -> Option<Vec<LevelDuration>> { None }
+    fn encode(&self, decoded: &DecodedSignal, _button: u8) -> Option<Vec<LevelDuration>> {
+        // Beyond 64 bits the C needs `data_2` (its `Data` line); at 64 it does not read it.
+        let data_2 = if decoded.data_count_bit > 64 { decoded.extra? } else { 0 };
+        let one = upload(decoded.data, data_2, decoded.data_count_bit)?;
+        Some(one.iter().copied().cycle().take(ENC_REPEAT * one.len()).collect())
+    }
 
     /// `subghz_protocol_decoder_bmw_cas3_deserialize` (and the encoder's, which asks the same):
     /// `Bit` from 64 to 128, the key (`flipper_format_read_hex(…, "Key", …, 8)`: 8 values or more,
     /// the first 8 used), and for more than 64 bits the 8-byte `Data` line (the C fails without it).
-    fn from_flipper_key(&self, key: &FlipperKey) -> Option<DecodedSignal> { None }
+    fn from_flipper_key(&self, key: &FlipperKey) -> Option<DecodedSignal> {
+        if !(usize::from(MIN_BITS)..=usize::from(MAX_BITS)).contains(&key.bits) || key.key_bytes.len() < 8 {
+            return None;
+        }
+        let data_2 = if key.bits > 64 {
+            let bytes = key.hex_bytes_field("Data")?;
+            if bytes.len() < 8 {
+                return None;
+            }
+            bytes[..8].iter().fold(0u64, |acc, &b| (acc << 8) | u64::from(b))
+        } else {
+            0
+        };
+        Some(signal(key.key, data_2, key.bits))
+    }
 
     /// `subghz_protocol_decoder_common_serialize_data_2`: the generic Key, then `Data` (`data_2`).
-    fn to_flipper_key(&self, decoded: &DecodedSignal) -> Option<FlipperKey> { None }
+    fn to_flipper_key(&self, decoded: &DecodedSignal) -> Option<FlipperKey> {
+        if !(usize::from(MIN_BITS)..=usize::from(MAX_BITS)).contains(&decoded.data_count_bit) {
+            return None;
+        }
+        let mut key = FlipperKey::for_protocol(NAME, decoded.data_count_bit, decoded.data);
+        key.push_hex("Data", decoded.extra?, 8);
+        Some(key)
+    }
 }
 
 /// Synthetic captures for the tests.

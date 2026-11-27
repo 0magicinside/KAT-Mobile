@@ -244,17 +244,44 @@ impl ProtocolDecoder for SantaFeDecoder {
         out
     }
 
-    fn supports_encoding(&self) -> bool { false }
+    fn supports_encoding(&self) -> bool {
+        true
+    }
 
     /// FoxFW's `enc_santa_fe.c` on the key file KAT writes for `decoded` with `Btn` = `button`:
     /// rolling word, serial and counter as captured, `button`, a fresh CRC, 3 times.
-    fn encode(&self, decoded: &DecodedSignal, button: u8) -> Option<Vec<LevelDuration>> { None }
+    fn encode(&self, decoded: &DecodedSignal, button: u8) -> Option<Vec<LevelDuration>> {
+        if decoded.data_count_bit != BIT_COUNT {
+            return None;
+        }
+        let data = decoded.data;
+        let serial = decoded.serial.unwrap_or((data >> 8) as u32);
+        let counter = decoded.counter.map_or(data as u8, |c| c as u8);
+        Some(upload(&frame((data >> 32) as u32, serial, counter, button)).repeat(REPEAT))
+    }
 
     /// `subghz_protocol_encoder_santa_fe_deserialize`: the frame the encoder sends from the file
     /// (see the module doc).
-    fn from_flipper_key(&self, key: &FlipperKey) -> Option<DecodedSignal> { None }
+    fn from_flipper_key(&self, key: &FlipperKey) -> Option<DecodedSignal> {
+        if key.bits != BIT_COUNT {
+            return None;
+        }
+        let data = key.key_u64()?;
+        let rolling = key.u32_field("Rolling").unwrap_or((data >> 32) as u32);
+        let serial = key.u32_field("Serial").unwrap_or((data >> 8) as u32);
+        let counter = key.u32_field("Cnt").unwrap_or(data as u32) as u8;
+        let button = key.u32_field("Btn").unwrap_or(0) as u8;
+        process(&frame(rolling, serial, counter, button))
+    }
 
-    fn to_flipper_key(&self, d: &DecodedSignal) -> Option<FlipperKey> { None }
+    fn to_flipper_key(&self, d: &DecodedSignal) -> Option<FlipperKey> {
+        let mut key = FlipperKey::for_protocol(NAME, d.data_count_bit, d.data);
+        key.push_u32("Serial", d.serial?);
+        key.push_u32("Btn", u32::from(d.button?));
+        key.push_u32("Cnt", u32::from(d.counter?));
+        key.push_u32("Rolling", (d.data >> 32) as u32);
+        Some(key)
+    }
 }
 
 #[cfg(test)]

@@ -237,13 +237,30 @@ impl ProtocolDecoder for MegaCodeDecoder {
         None
     }
 
-    fn supports_encoding(&self) -> bool { false }
+    fn supports_encoding(&self) -> bool {
+        true
+    }
 
-    fn encode(&self, decoded: &DecodedSignal, button: u8) -> Option<Vec<LevelDuration>> { None }
+    fn encode(&self, decoded: &DecodedSignal, button: u8) -> Option<Vec<LevelDuration>> {
+        if decoded.data_count_bit != MIN_COUNT_BIT {
+            return None;
+        }
+        let data = if button <= 0b111 {
+            (decoded.data & !0b111) | button as u64
+        } else {
+            decoded.data
+        };
+        Some(with_repeats(&build_frame(data), TX_REPEAT))
+    }
 
-    fn from_flipper_key(&self, key: &FlipperKey) -> Option<DecodedSignal> { None }
+    fn from_flipper_key(&self, key: &FlipperKey) -> Option<DecodedSignal> {
+        let (bits, data) = generic_fields(key);
+        (bits == MIN_COUNT_BIT).then(|| decoded(data))
+    }
 
-    fn to_flipper_key(&self, d: &DecodedSignal) -> Option<FlipperKey> { None }
+    fn to_flipper_key(&self, d: &DecodedSignal) -> Option<FlipperKey> {
+        Some(generic_key(NAME, d))
+    }
 }
 
 #[cfg(test)]

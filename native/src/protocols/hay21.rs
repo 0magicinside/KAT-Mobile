@@ -218,13 +218,43 @@ impl ProtocolDecoder for Hay21Decoder {
         None
     }
 
-    fn supports_encoding(&self) -> bool { false }
+    fn supports_encoding(&self) -> bool {
+        true
+    }
 
-    fn encode(&self, decoded: &DecodedSignal, button: u8) -> Option<Vec<LevelDuration>> { None }
+    fn encode(&self, decoded: &DecodedSignal, button: u8) -> Option<Vec<LevelDuration>> {
+        if decoded.data_count_bit != BIT_COUNT {
+            return None;
+        }
+        let (captured_button, serial, captured_counter) = fields(decoded.data);
+        let button = if BUTTONS.contains(&captured_button) && BUTTONS.contains(&button) {
+            button
+        } else {
+            captured_button
+        };
+        let counter = u32::from(decoded.counter.unwrap_or(captured_counter));
+        // `cnt + mult > 0xF → 0`, mult = 1.
+        let counter = if counter + 1 > 0xF { 0 } else { counter + 1 };
+        let key =
+            (u64::from(button) << 13) | (u64::from(serial) << 5) | (u64::from(counter) << 1) | 1;
+        Some(repeat_upload(&upload(key), REPEAT))
+    }
 
-    fn from_flipper_key(&self, key: &FlipperKey) -> Option<DecodedSignal> { None }
+    fn from_flipper_key(&self, key: &FlipperKey) -> Option<DecodedSignal> {
+        (key.bits == BIT_COUNT).then(|| signal(key.key))
+    }
 
-    fn to_flipper_key(&self, decoded: &DecodedSignal) -> Option<FlipperKey> { None }
+    fn to_flipper_key(&self, decoded: &DecodedSignal) -> Option<FlipperKey> {
+        (decoded.data_count_bit == BIT_COUNT).then(|| {
+            FlipperKey::new(
+                "Hay21",
+                BIT_COUNT,
+                decoded.data,
+                433_920_000,
+                "FuriHalSubGhzPresetOok650Async",
+            )
+        })
+    }
 }
 
 #[cfg(test)]

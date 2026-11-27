@@ -341,9 +341,13 @@ impl ProtocolDecoder for SuzukiTs002Decoder {
         None
     }
 
-    fn supports_encoding(&self) -> bool { false }
+    fn supports_encoding(&self) -> bool {
+        true
+    }
 
-    fn encode(&self, decoded: &DecodedSignal, button: u8) -> Option<Vec<LevelDuration>> { None }
+    fn encode(&self, decoded: &DecodedSignal, button: u8) -> Option<Vec<LevelDuration>> {
+        Some(upload(Fields::of(decoded)?.next(button).frame()))
+    }
 }
 
 #[cfg(test)]

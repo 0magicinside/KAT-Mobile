@@ -222,14 +222,30 @@ impl ProtocolDecoder for PsaTwoButtonDecoder {
         None
     }
 
-    fn supports_encoding(&self) -> bool { false }
+    fn supports_encoding(&self) -> bool {
+        true
+    }
 
     /// Transmit the frame [`TX_COPIES`] times behind one wake-up carrier. When the frame deciphered
     /// (its `counter` is set and the key table is loaded), the code sent is the **next** press's
     /// (counter + 1); otherwise the captured code is replayed. The button stays the decoded frame's
     /// (it is the clear header nibble; the requested button is ignored). `None` if the decode is not
     /// a 76-bit frame or has no `extra`.
-    fn encode(&self, decoded: &DecodedSignal, _button: u8) -> Option<Vec<LevelDuration>> { None }
+    fn encode(&self, decoded: &DecodedSignal, _button: u8) -> Option<Vec<LevelDuration>> {
+        if decoded.data_count_bit != FRAME_BITS {
+            return None;
+        }
+        let extra = decoded.extra?;
+        // Next code when the frame deciphered and the table is still loaded; else replay the capture.
+        let code = decoded.counter.and_then(|_| cipher::next_code(decoded.data)).unwrap_or(decoded.data);
+        // One wake-up carrier, then the frame TX_COPIES times (each ended by its 2.5 ms carrier,
+        // which the next frame's pause separates from it).
+        let mut wire = vec![LevelDuration::new(true, LEADIN_US)];
+        for _ in 0..TX_COPIES {
+            wire.extend(frame_pulses(extra, code));
+        }
+        Some(burst::merged(wire))
+    }
 }
 
 #[cfg(test)]

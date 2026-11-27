@@ -157,10 +157,14 @@ impl ProtocolDecoder for Mic6sc2Decoder {
         self.rx.feed(&mut Decode(decode), level, duration_us)
     }
 
-    fn supports_encoding(&self) -> bool { false }
+    fn supports_encoding(&self) -> bool {
+        false
+    }
 
     /// rtl_433 decodes only.
-    fn encode(&self, _decoded: &DecodedSignal, _button: u8) -> Option<Vec<LevelDuration>> { None }
+    fn encode(&self, _decoded: &DecodedSignal, _button: u8) -> Option<Vec<LevelDuration>> {
+        None
+    }
 }
 
 /// rtl_433's JSON fields of a decode, rebuilt from KAT's (the field mapping, for the parity tests).

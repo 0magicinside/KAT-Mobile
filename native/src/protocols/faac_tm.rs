@@ -235,13 +235,27 @@ impl ProtocolDecoder for FaacTmDecoder {
         None
     }
 
-    fn supports_encoding(&self) -> bool { false }
+    fn supports_encoding(&self) -> bool {
+        true
+    }
 
-    fn encode(&self, decoded: &DecodedSignal, _button: u8) -> Option<Vec<LevelDuration>> { None }
+    fn encode(&self, decoded: &DecodedSignal, _button: u8) -> Option<Vec<LevelDuration>> {
+        if decoded.data_count_bit != MIN_COUNT_BIT {
+            return None;
+        }
+        let te = tx_te(decoded.extra.unwrap_or(0) as u32);
+        Some(with_repeats(&build_frame(decoded.data, te), TX_REPEAT))
+    }
 
-    fn from_flipper_key(&self, key: &FlipperKey) -> Option<DecodedSignal> { None }
+    fn from_flipper_key(&self, key: &FlipperKey) -> Option<DecodedSignal> {
+        (key.bits == MIN_COUNT_BIT).then(|| decoded(key.key, key.u32_field("TE").unwrap_or(0)))
+    }
 
-    fn to_flipper_key(&self, d: &DecodedSignal) -> Option<FlipperKey> { None }
+    fn to_flipper_key(&self, d: &DecodedSignal) -> Option<FlipperKey> {
+        let mut key = FlipperKey::new(NAME, d.data_count_bit, d.data, 433_920_000, "FuriHalSubGhzPresetOok650Async");
+        key.push("TE", d.extra.unwrap_or(0).to_string());
+        Some(key)
+    }
 }
 
 #[cfg(test)]

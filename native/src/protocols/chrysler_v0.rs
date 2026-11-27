@@ -567,17 +567,47 @@ impl ProtocolDecoder for ChryslerV0Decoder {
         None
     }
 
-    fn supports_encoding(&self) -> bool { false }
+    fn supports_encoding(&self) -> bool {
+        true
+    }
 
     /// The fob's next press (see the module doc, "Encoder").
-    fn encode(&self, decoded: &DecodedSignal, button: u8) -> Option<Vec<LevelDuration>> { None }
+    fn encode(&self, decoded: &DecodedSignal, button: u8) -> Option<Vec<LevelDuration>> {
+        if decoded.data_count_bit != DECODE_BIT_COUNT {
+            return None;
+        }
+        let frame = Frame::read(decoded.data, u16::try_from(decoded.extra?).ok()?);
+        if !frame.readable() {
+            return None;
+        }
+        let (data, data_2) = frame.next(Self::button_byte(button, frame.plain[4])).bits();
+        Some(Self::press(data, data_2))
+    }
 
     /// `subghz_protocol_decoder_chrysler_v0_deserialize` (see the module doc, "Key files").
-    fn from_flipper_key(&self, key: &FlipperKey) -> Option<DecodedSignal> { None }
+    fn from_flipper_key(&self, key: &FlipperKey) -> Option<DecodedSignal> {
+        let data = key.key_u64()?;
+        let key2: [u8; 2] = key.hex_bytes_field("Key_2")?.try_into().ok()?;
+        Some(Self::frame_signal(data, u16::from_be_bytes(key2)))
+    }
 
     /// `subghz_protocol_decoder_chrysler_v0_serialize`: the C's lines, from the C's model (see the
     /// module doc, "Key files").
-    fn to_flipper_key(&self, decoded: &DecodedSignal) -> Option<FlipperKey> { None }
+    fn to_flipper_key(&self, decoded: &DecodedSignal) -> Option<FlipperKey> {
+        if decoded.data_count_bit != DECODE_BIT_COUNT {
+            return None;
+        }
+        let data_2 = u16::try_from(decoded.extra?).ok()?;
+        let d = Self::decode_packet(decoded.data, data_2);
+        let mut key = FlipperKey::for_protocol("Chrysler V0", DECODE_BIT_COUNT, decoded.data);
+        key.push_hex_bytes("Key_2", &data_2.to_be_bytes());
+        let plain = if d.seed & 1 != 0 { "Plain_B" } else { "Plain_A" };
+        key.push_hex_bytes(plain, &Self::plaintext(decoded.data, data_2));
+        key.push_u32("Serial", d.serial);
+        key.push_u32("Btn", d.button.into());
+        key.push_u32("Cnt", d.seed.into());
+        Some(key)
+    }
 }
 
 impl Default for ChryslerV0Decoder {

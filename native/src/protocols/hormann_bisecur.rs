@@ -374,13 +374,28 @@ impl ProtocolDecoder for HormannBiSecurDecoder {
         None
     }
 
-    fn supports_encoding(&self) -> bool { false }
+    fn supports_encoding(&self) -> bool {
+        true
+    }
 
-    fn encode(&self, decoded: &DecodedSignal, _button: u8) -> Option<Vec<LevelDuration>> { None }
+    fn encode(&self, decoded: &DecodedSignal, _button: u8) -> Option<Vec<LevelDuration>> {
+        frame_of(decoded).map(|f| upload(&f))
+    }
 
-    fn from_flipper_key(&self, key: &FlipperKey) -> Option<DecodedSignal> { None }
+    fn from_flipper_key(&self, key: &FlipperKey) -> Option<DecodedSignal> {
+        if key.bits != BIT_COUNT || key.key_bytes.len() < LEN {
+            return None;
+        }
+        let frame: [u8; LEN] = key.key_bytes[..LEN].try_into().ok()?;
+        crc_ok(&frame).then(|| signal(&frame))
+    }
 
-    fn to_flipper_key(&self, decoded: &DecodedSignal) -> Option<FlipperKey> { None }
+    fn to_flipper_key(&self, decoded: &DecodedSignal) -> Option<FlipperKey> {
+        let frame = frame_of(decoded)?;
+        let mut key = FlipperKey::for_protocol(NAME, BIT_COUNT, be_u64(&frame[..8]));
+        key.key_bytes = frame.to_vec();
+        Some(key)
+    }
 }
 
 /// Frame builders for the fuzz tool.

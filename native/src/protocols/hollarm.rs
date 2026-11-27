@@ -246,13 +246,27 @@ impl ProtocolDecoder for HollarmDecoder {
         None
     }
 
-    fn supports_encoding(&self) -> bool { false }
+    fn supports_encoding(&self) -> bool {
+        true
+    }
 
-    fn encode(&self, decoded: &DecodedSignal, button: u8) -> Option<Vec<LevelDuration>> { None }
+    fn encode(&self, decoded: &DecodedSignal, button: u8) -> Option<Vec<LevelDuration>> {
+        if decoded.data_count_bit != BIT_COUNT {
+            return None;
+        }
+        let captured = ((decoded.data >> 8) & 0xF) as u8;
+        let btn = if button <= 0xF { button } else { captured };
+        Some(with_repeats(&upload(rebuild(decoded.data, btn)), REPEAT))
+    }
 
-    fn from_flipper_key(&self, key: &FlipperKey) -> Option<DecodedSignal> { None }
+    fn from_flipper_key(&self, key: &FlipperKey) -> Option<DecodedSignal> {
+        (key.bits == BIT_COUNT).then(|| signal(key.key))
+    }
 
-    fn to_flipper_key(&self, decoded: &DecodedSignal) -> Option<FlipperKey> { None }
+    fn to_flipper_key(&self, decoded: &DecodedSignal) -> Option<FlipperKey> {
+        (decoded.data_count_bit == BIT_COUNT)
+            .then(|| FlipperKey::for_protocol(NAME, BIT_COUNT, decoded.data))
+    }
 }
 
 /// Frame builders for the other F modules' tests and the fuzz tool.

@@ -529,19 +529,81 @@ impl ProtocolDecoder for ToyotaDecoder {
         }
     }
 
-    fn supports_encoding(&self) -> bool { false }
+    fn supports_encoding(&self) -> bool {
+        true
+    }
 
     /// Re-send the stored frame at counter-1 (`subghz_protocol_encoder_toyota_deserialize` →
     /// `toyota_get_upload`). `None` if the stored frame is not recoverable. The button argument is
     /// ignored: the C's command selection never reaches the transmitted frame.
-    fn encode(&self, decoded: &DecodedSignal, _button: u8) -> Option<Vec<LevelDuration>> { None }
+    fn encode(&self, decoded: &DecodedSignal, _button: u8) -> Option<Vec<LevelDuration>> {
+        // The C deserializers require exactly 96 bits and a 32-bit tail (Key_2 high half zero).
+        if decoded.data_count_bit != COUNT_BIT {
+            return None;
+        }
+        let tail = decoded.extra.unwrap_or(0);
+        if tail >> 32 != 0 {
+            return None;
+        }
+        let key = join_payload(decoded.data, tail);
+        encode_action(&key).map(|(upload, _)| upload)
+    }
 
     /// `subghz_protocol_decoder_toyota_deserialize` (see the module doc, "Key files"). A key of 66..=68
     /// bits is FoxFW's "Toyota" and goes to Toyota (FoxFW).
-    fn from_flipper_key(&self, key: &FlipperKey) -> Option<DecodedSignal> { None }
+    fn from_flipper_key(&self, key: &FlipperKey) -> Option<DecodedSignal> {
+        if super::toyota_foxfw::KEY_FILE_BITS.contains(&key.bits) {
+            return super::toyota_foxfw::ToyotaFoxfwDecoder::new().from_flipper_key(key);
+        }
+        let have_copy = key.hex_bytes_field("Copy").is_some_and(|c| c.len() == PAYLOAD_BYTES);
+        let tail = key.hex_field("Key_2")?;
+        if tail >> 32 != 0 || key.bits != COUNT_BIT {
+            return None;
+        }
+        let data = key.key_u64()?;
+        if !have_copy && (data >> 56 != 0 || data & (1 << 55) == 0) {
+            return None;
+        }
+        let payload = join_payload(data, tail);
+        // toyota_read_button: the saved ToyotaBtn and the selected Btn must be consistent.
+        let mut previous = u32::from(button_from_payload(&payload));
+        if let Some(saved) = key.u32_field("ToyotaBtn") {
+            if saved > 255 || (saved > 3 && !button_is_estima(saved as u8)) || (!have_copy && saved != previous) {
+                return None;
+            }
+            previous = saved;
+        }
+        let selected = key.u32_field("Btn").unwrap_or(previous);
+        let previous = previous as u8;
+        let change_valid = selected <= 255
+            && ((1..=3).contains(&selected)
+                || (button_is_estima(previous) && (selected == u32::from(previous) || selected == u32::from(previous ^ ESTIMA_XOR)))
+                || (previous == 0 && selected == 0));
+        change_valid.then(|| payload_signal(&payload))
+    }
 
     /// `subghz_protocol_decoder_toyota_serialize`: Key, Key_2, Btn, ToyotaBtn, Disp.
-    fn to_flipper_key(&self, decoded: &DecodedSignal) -> Option<FlipperKey> { None }
+    fn to_flipper_key(&self, decoded: &DecodedSignal) -> Option<FlipperKey> {
+        let tail = decoded.extra.unwrap_or(0);
+        if decoded.data_count_bit != COUNT_BIT || tail >> 32 != 0 {
+            return None;
+        }
+        let payload = join_payload(decoded.data, tail);
+        let button = decoded.button.unwrap_or_else(|| button_from_payload(&payload));
+        let name = if button_is_estima(button) {
+            "Estima"
+        } else if (1..=3).contains(&button) {
+            "Cmd"
+        } else {
+            "Unknown"
+        };
+        let mut key = FlipperKey::for_protocol("Toyota", COUNT_BIT, decoded.data);
+        key.push_hex("Key_2", tail, 8);
+        key.push_u32("Btn", button.into());
+        key.push_u32("ToyotaBtn", button.into());
+        key.push("Disp", format!("Toyota - {name}"));
+        Some(key)
+    }
 }
 
 impl Default for ToyotaDecoder {

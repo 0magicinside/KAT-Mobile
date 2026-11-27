@@ -486,15 +486,113 @@ impl ProtocolDecoder for HondaV2Decoder {
         None
     }
 
-    fn supports_encoding(&self) -> bool { false }
+    fn supports_encoding(&self) -> bool {
+        true
+    }
 
-    fn encode(&self, decoded: &DecodedSignal, button: u8) -> Option<Vec<LevelDuration>> { None }
+    fn encode(&self, decoded: &DecodedSignal, button: u8) -> Option<Vec<LevelDuration>> {
+        // subghz_protocol_encoder_honda_v2_deserialize: Bit must be 81; the Key's fields, then
+        // the file's Serial / Cnt (the emulate scene writes counter + 1) / Btn. A Btn with a
+        // known signature replaces the Key's command signature; otherwise the Key's is kept
+        // (any non-zero signature is sent, as in the C).
+        if decoded.data_count_bit != COUNT_BIT {
+            return None;
+        }
+        let b = decoded.data.to_be_bytes();
+        let key_signature = ((b[0] as u32) << 16) | ((b[1] as u32) << 8) | b[2] as u32;
+        let key_serial = ((b[3] as u32) << 16) | ((b[4] as u32) << 8) | b[5] as u32;
+        let key_count = Self::count_from_bytes(&b);
+        let serial = decoded.serial.unwrap_or(key_serial) & 0x00FF_FFFF;
+        let count = (decoded.counter.map(u32::from).unwrap_or(key_count) + 1) & 0x1FF;
+        let captured = decoded.button.unwrap_or_else(|| Self::button_from_signature(key_signature));
+        let signature = match Self::signature_from_button(Self::map_button(button, captured)) {
+            0 => key_signature,
+            sig => sig,
+        };
+        if signature == 0 {
+            return None;
+        }
+
+        let key = Self::build_key(signature, serial, count);
+        let key_bytes = key.to_be_bytes();
+        let tail = Self::calculate_tail(count);
+
+        // Capacity: preamble pairs (2 levels) + sync (3) + ~81 bits (≤2 levels each) + gap.
+        let mut signal = Vec::with_capacity(TX_PREAMBLE_PAIRS * 2 + 3 + COUNT_BIT * 2 + 1);
+
+        // Preamble: alternating short high/low pairs.
+        for _ in 0..TX_PREAMBLE_PAIRS {
+            Self::enc_add_level(&mut signal, true, TE_SHORT);
+            Self::enc_add_level(&mut signal, false, TE_SHORT);
+        }
+
+        // Sync: high 750, low 750, then a boundary short-high pad (skipped by the decoder).
+        Self::enc_add_level(&mut signal, true, SYNC_US);
+        Self::enc_add_level(&mut signal, false, SYNC_US);
+        Self::enc_add_level(&mut signal, true, TE_SHORT);
+
+        // Differential-Manchester body. previous_bit starts true (bit 0 = 1 is implied by the sync
+        // trailing short). Bit index 1 is forced to 0 (matches the C build_upload), then bits 2..63
+        // come from the key bytes.
+        let mut previous_bit = true;
+        previous_bit = Self::enc_add_bit(&mut signal, previous_bit, false);
+        for bit_index in 2..64u8 {
+            let byte_index = (bit_index / 8) as usize;
+            let bit_in_byte = 7 - (bit_index % 8);
+            let bit = (key_bytes[byte_index] >> bit_in_byte) & 1 != 0;
+            previous_bit = Self::enc_add_bit(&mut signal, previous_bit, bit);
+        }
+
+        // 16-bit tail, MSB first.
+        for bit_index in 0..16u8 {
+            let bit = (tail >> (15 - bit_index)) & 1 != 0;
+            previous_bit = Self::enc_add_bit(&mut signal, previous_bit, bit);
+        }
+
+        // Trailing extra bit = 1.
+        let _ = Self::enc_add_bit(&mut signal, previous_bit, true);
+
+        // Inter-frame gap.
+        Self::enc_add_level(&mut signal, false, GAP_US);
+
+        Some(signal)
+    }
 
     /// `subghz_protocol_decoder_honda_v2_deserialize` (see the module doc, Key files).
-    fn from_flipper_key(&self, key: &FlipperKey) -> Option<DecodedSignal> { None }
+    fn from_flipper_key(&self, key: &FlipperKey) -> Option<DecodedSignal> {
+        if key.bits != COUNT_BIT {
+            return None;
+        }
+        let data = key.key_u64()?;
+        let count = Self::count_from_bytes(&data.to_be_bytes());
+        let tail = key.u32_field("Tail").map_or_else(|| Self::calculate_tail(count), |t| t as u16);
+        let extra_bit = key.u32_field("ExtraBit").is_none_or(|e| e & 1 != 0);
+        let (check_ok, tail_ok) = Self::validate_frame(data, tail, extra_bit);
+        Some(Self::signal(data, tail, check_ok && tail_ok))
+    }
 
     /// `subghz_protocol_decoder_honda_v2_serialize` (see the module doc, Key files).
-    fn to_flipper_key(&self, decoded: &DecodedSignal) -> Option<FlipperKey> { None }
+    fn to_flipper_key(&self, decoded: &DecodedSignal) -> Option<FlipperKey> {
+        if decoded.data_count_bit != COUNT_BIT {
+            return None;
+        }
+        let data = decoded.data;
+        let b = data.to_be_bytes();
+        let signature = ((b[0] as u32) << 16) | ((b[1] as u32) << 8) | b[2] as u32;
+        let count = Self::count_from_bytes(&b);
+        let tail = decoded.extra.map_or_else(|| Self::calculate_tail(count), |t| t as u16);
+        let (check_ok, tail_ok) = Self::validate_frame(data, tail, true);
+        let extra_bit = decoded.crc_valid || !(check_ok && tail_ok);
+        let mut key = FlipperKey::for_protocol("Honda V2", COUNT_BIT, data);
+        key.push_u32("Serial", ((b[3] as u32) << 16) | ((b[4] as u32) << 8) | b[5] as u32);
+        key.push_u32("Btn", Self::button_from_signature(signature).into());
+        key.push_u32("BtnSig", signature);
+        key.push_u32("Cnt", count);
+        key.push_u32("Check", (b[7] & 0x07).into());
+        key.push_u32("Tail", tail.into());
+        key.push_u32("ExtraBit", extra_bit.into());
+        Some(key)
+    }
 }
 
 impl Default for HondaV2Decoder {

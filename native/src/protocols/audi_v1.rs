@@ -246,17 +246,39 @@ impl ProtocolDecoder for AudiV1Decoder {
         None
     }
 
-    fn supports_encoding(&self) -> bool { false }
+    fn supports_encoding(&self) -> bool {
+        false
+    }
 
-    fn encode(&self, _decoded: &DecodedSignal, _button: u8) -> Option<Vec<LevelDuration>> { None }
+    fn encode(&self, _decoded: &DecodedSignal, _button: u8) -> Option<Vec<LevelDuration>> {
+        None
+    }
 
     /// `subghz_protocol_decoder_audi_v1_deserialize`: `Bit: 88`, the first 64 bits as the key and
     /// the 6-byte `Hop` line; without it the C rebuilds a partial hop from the key's low 24 bits.
     /// No button or serial gate is applied.
-    fn from_flipper_key(&self, key: &FlipperKey) -> Option<DecodedSignal> { None }
+    fn from_flipper_key(&self, key: &FlipperKey) -> Option<DecodedSignal> {
+        if key.bits != usize::from(DATA_BITS) {
+            return None;
+        }
+        let hop = match key.hex_bytes_field("Hop") {
+            Some(bytes) if bytes.len() >= 6 => {
+                bytes[..6].iter().fold(0u64, |acc, &b| (acc << 8) | u64::from(b))
+            }
+            _ => (key.key & 0xFF_FFFF) << 24,
+        };
+        Some(signal(key.key, hop))
+    }
 
     /// `subghz_protocol_decoder_audi_v1_serialize`: the generic Key, then the 6-byte `Hop`.
-    fn to_flipper_key(&self, decoded: &DecodedSignal) -> Option<FlipperKey> { None }
+    fn to_flipper_key(&self, decoded: &DecodedSignal) -> Option<FlipperKey> {
+        if decoded.data_count_bit != usize::from(DATA_BITS) {
+            return None;
+        }
+        let mut key = FlipperKey::for_protocol(NAME, usize::from(DATA_BITS), decoded.data);
+        key.push_hex("Hop", decoded.extra?, 6);
+        Some(key)
+    }
 }
 
 /// Synthetic captures for the tests.

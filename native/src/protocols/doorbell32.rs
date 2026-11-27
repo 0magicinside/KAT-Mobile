@@ -226,13 +226,32 @@ impl ProtocolDecoder for Doorbell32Decoder {
         None
     }
 
-    fn supports_encoding(&self) -> bool { false }
+    fn supports_encoding(&self) -> bool {
+        true
+    }
 
-    fn encode(&self, decoded: &DecodedSignal, _button: u8) -> Option<Vec<LevelDuration>> { None }
+    fn encode(&self, decoded: &DecodedSignal, _button: u8) -> Option<Vec<LevelDuration>> {
+        if decoded.data_count_bit != MIN_COUNT_BIT {
+            return None;
+        }
+        let te = decoded.extra.map_or(TE_SHORT, |t| t as u32);
+        (te > 0).then(|| with_repeats(&build_frame(decoded.data, te), TX_REPEAT))
+    }
 
-    fn from_flipper_key(&self, key: &FlipperKey) -> Option<DecodedSignal> { None }
+    fn from_flipper_key(&self, key: &FlipperKey) -> Option<DecodedSignal> {
+        (key.bits == MIN_COUNT_BIT).then(|| decoded(key.key, key.u32_field("TE")))
+    }
 
-    fn to_flipper_key(&self, d: &DecodedSignal) -> Option<FlipperKey> { None }
+    fn to_flipper_key(&self, d: &DecodedSignal) -> Option<FlipperKey> {
+        if d.data_count_bit != MIN_COUNT_BIT {
+            return None;
+        }
+        let mut key = FlipperKey::for_protocol(NAME, MIN_COUNT_BIT, d.data);
+        if let Some(te) = d.extra {
+            key.push_u32("TE", te as u32);
+        }
+        Some(key)
+    }
 }
 
 #[cfg(test)]

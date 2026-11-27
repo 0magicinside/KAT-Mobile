@@ -248,13 +248,39 @@ impl ProtocolDecoder for HoltekHt12xDecoder {
         None
     }
 
-    fn supports_encoding(&self) -> bool { false }
+    fn supports_encoding(&self) -> bool {
+        true
+    }
 
-    fn encode(&self, decoded: &DecodedSignal, button: u8) -> Option<Vec<LevelDuration>> { None }
+    fn encode(&self, decoded: &DecodedSignal, button: u8) -> Option<Vec<LevelDuration>> {
+        if decoded.data_count_bit != MIN_COUNT_BIT {
+            return None;
+        }
+        let te = decoded.extra? as u32;
+        if te == 0 {
+            return None;
+        }
+        let data = if button <= 0x0F {
+            (decoded.data & !0x0F) | button as u64
+        } else {
+            decoded.data
+        };
+        Some(with_repeats(&build_frame(data, te), TX_REPEAT))
+    }
 
-    fn from_flipper_key(&self, key: &FlipperKey) -> Option<DecodedSignal> { None }
+    fn from_flipper_key(&self, key: &FlipperKey) -> Option<DecodedSignal> {
+        let (bits, data) = generic_fields(key);
+        if bits != MIN_COUNT_BIT {
+            return None;
+        }
+        Some(decoded(data, u32_line(key, "TE")?))
+    }
 
-    fn to_flipper_key(&self, d: &DecodedSignal) -> Option<FlipperKey> { None }
+    fn to_flipper_key(&self, d: &DecodedSignal) -> Option<FlipperKey> {
+        let mut key = generic_key(NAME, d);
+        key.push("TE", (d.extra? as u32).to_string());
+        Some(key)
+    }
 }
 
 #[cfg(test)]

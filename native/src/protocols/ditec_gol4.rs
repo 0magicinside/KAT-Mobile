@@ -330,15 +330,31 @@ impl ProtocolDecoder for DitecGol4Decoder {
         None
     }
 
-    fn supports_encoding(&self) -> bool { false }
+    fn supports_encoding(&self) -> bool {
+        true
+    }
 
-    fn encode(&self, decoded: &DecodedSignal, button: u8) -> Option<Vec<LevelDuration>> { None }
+    fn encode(&self, decoded: &DecodedSignal, button: u8) -> Option<Vec<LevelDuration>> {
+        if decoded.data_count_bit != MIN_COUNT_BIT as usize {
+            return None;
+        }
+        let (serial, captured, counter) = decode_key(decoded.data);
+        let btn = if button <= 0x0F { button } else { captured };
+        let next = g6_common::counter_increment(u32::from(counter)) as u16;
+        Some(build_upload(encode_key(serial, btn, next)).repeat(REPEAT))
+    }
 
     /// The decoder's deserialize (`Bit` must be 54) + `get_string`.
-    fn from_flipper_key(&self, key: &FlipperKey) -> Option<DecodedSignal> { None }
+    fn from_flipper_key(&self, key: &FlipperKey) -> Option<DecodedSignal> {
+        (key.bits == MIN_COUNT_BIT as usize).then(|| signal(key.key))
+    }
 
     /// The serialize: `Protocol`, `Bit`, `Key`.
-    fn to_flipper_key(&self, decoded: &DecodedSignal) -> Option<FlipperKey> { None }
+    fn to_flipper_key(&self, decoded: &DecodedSignal) -> Option<FlipperKey> {
+        (decoded.data_count_bit == MIN_COUNT_BIT as usize).then(|| {
+            FlipperKey::new("Ditec GOL4", MIN_COUNT_BIT as usize, decoded.data, 433_920_000, "FuriHalSubGhzPresetOok650Async")
+        })
+    }
 }
 
 #[cfg(test)]

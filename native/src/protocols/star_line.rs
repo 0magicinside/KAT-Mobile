@@ -466,9 +466,31 @@ impl ProtocolDecoder for StarLineDecoder {
         None
     }
 
-    fn supports_encoding(&self) -> bool { false }
+    fn supports_encoding(&self) -> bool {
+        true
+    }
 
-    fn encode(&self, decoded: &DecodedSignal, button: u8) -> Option<Vec<LevelDuration>> { None }
+    fn encode(&self, decoded: &DecodedSignal, button: u8) -> Option<Vec<LevelDuration>> {
+        if decoded.data_count_bit != MIN_COUNT_BIT {
+            return None;
+        }
+        let data = Self::encode_key(decoded, button)?;
+        let mut signal = Vec::with_capacity(TX_REPEAT * (12 + MIN_COUNT_BIT * 2));
+        for _ in 0..TX_REPEAT {
+            // Header: 6 pairs of te_long * 2 HIGH + LOW.
+            for _ in 0..6 {
+                signal.push(LevelDuration::new(true, HEADER_DURATION));
+                signal.push(LevelDuration::new(false, HEADER_DURATION));
+            }
+            // Data: 64 bits MSB first (1 = long/long, 0 = short/short).
+            for bit in (0..MIN_COUNT_BIT).rev() {
+                let te = if (data >> bit) & 1 == 1 { TE_LONG } else { TE_SHORT };
+                signal.push(LevelDuration::new(true, te));
+                signal.push(LevelDuration::new(false, te));
+            }
+        }
+        Some(signal)
+    }
 
     /// `subghz_protocol_decoder_star_line_deserialize` (ProtoPirate; Flipper-ARF's is the same
     /// with optional Serial/Btn/Cnt) + the `check_remote_controller` its display runs. The key must
@@ -476,12 +498,46 @@ impl ProtocolDecoder for StarLineDecoder {
     /// "Manufacture" restricts the key search to that keystore name (no match → the C's "Unknown",
     /// counter 0); "Manufacture: Unknown" skips the search and keeps the file's Cnt; without the
     /// line the whole keystore is searched, as on air. Serial and button always come from the key.
-    fn from_flipper_key(&self, key: &FlipperKey) -> Option<DecodedSignal> { None }
+    fn from_flipper_key(&self, key: &FlipperKey) -> Option<DecodedSignal> {
+        let data = key.key_u64().filter(|&k| k != 0)?;
+        let (fix, hop) = fix_hop(data);
+        Some(match key.field("Manufacture").map(str::trim) {
+            None | Some("") => Self::parse_data(data),
+            Some("Unknown") => {
+                Self::signal_for(data, None, key.u32_field("Cnt").unwrap_or(0) as u16)
+            }
+            Some(mf) => Self::signal_for(data, find_key_where(fix, hop, |e| e.name == mf), 0),
+        })
+    }
 
     /// `subghz_protocol_decoder_star_line_serialize` (ProtoPirate = Flipper-ARF): Protocol
     /// "Star Line", Bit 64, Key, then Serial, Btn, Cnt (decimal) and Manufacture (the decode's
     /// `[<manufacturer>]`, or "Unknown"). Key is one 16-digit word, as the C writes it.
-    fn to_flipper_key(&self, decoded: &DecodedSignal) -> Option<FlipperKey> { None }
+    fn to_flipper_key(&self, decoded: &DecodedSignal) -> Option<FlipperKey> {
+        if decoded.data_count_bit != MIN_COUNT_BIT {
+            return None;
+        }
+        let (fix, hop) = fix_hop(decoded.data);
+        let named = decoded
+            .protocol_display_name
+            .as_deref()
+            .and_then(|n| n.strip_prefix("Star Line ["))
+            .and_then(|n| n.strip_suffix(']'));
+        // The C re-runs the search with the saved manufacturer (the whole keystore for a decode).
+        let found = match named {
+            Some(mf) => find_key_where(fix, hop, |e| e.name == mf),
+            None if decoded.crc_valid => find_key(fix, hop),
+            None => None,
+        };
+        let cnt = found.as_ref().map_or(decoded.counter.unwrap_or(0), |m| m.cnt);
+        let mut key = FlipperKey::for_protocol("Star Line", MIN_COUNT_BIT, decoded.data);
+        key.key_word = true;
+        key.push_u32("Serial", fix & 0x00FF_FFFF);
+        key.push_u32("Btn", fix >> 24);
+        key.push_u32("Cnt", cnt.into());
+        key.push("Manufacture", found.map_or("Unknown", |m| m.entry.name.as_str()));
+        Some(key)
+    }
 }
 
 impl Default for StarLineDecoder {

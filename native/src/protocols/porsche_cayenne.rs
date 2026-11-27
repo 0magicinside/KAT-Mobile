@@ -402,15 +402,67 @@ impl ProtocolDecoder for PorscheCayenneDecoder {
         None
     }
 
-    fn supports_encoding(&self) -> bool { false }
+    fn supports_encoding(&self) -> bool {
+        true
+    }
 
-    fn encode(&self, decoded: &DecodedSignal, button: u8) -> Option<Vec<LevelDuration>> { None }
+    fn encode(&self, decoded: &DecodedSignal, button: u8) -> Option<Vec<LevelDuration>> {
+        let serial = decoded.serial? & 0xFFFFFF;
+        let cnt = decoded.counter.unwrap_or(0);
+        let btn = Self::map_button(button, decoded.button);
+
+        // 4-frame burst (matches porsche_cayenne_build_upload):
+        //   Frame 0: frame_type=0b010, cipher counter = cnt+1
+        //   Frame 1: frame_type=0b001, cipher counter = cnt+2
+        //   Frame 2: frame_type=0b100, cipher counter = cnt+3
+        //   Frame 3: frame_type=0b100, cipher counter = cnt+4
+        // (compute_frame increments the passed counter by 1 internally.)
+        const FRAME_TYPES: [u8; 4] = [0b010, 0b001, 0b100, 0b100];
+
+        // Per-frame size: 73 sync pairs + 1 gap pair + 64 bit pairs = (73 + 1 + 64) * 2.
+        let mut signal = Vec::with_capacity((PC_SYNC_COUNT + 1 + 64) * 2 * 4);
+
+        for (f, &ft) in FRAME_TYPES.iter().enumerate() {
+            let pkt = compute_frame(serial, btn, cnt.wrapping_add(f as u16), ft);
+            Self::push_frame(&mut signal, &pkt);
+        }
+
+        Some(signal)
+    }
 
     /// `subghz_protocol_decoder_porsche_cayenne_deserialize` (see the module doc, "Key files").
-    fn from_flipper_key(&self, key: &FlipperKey) -> Option<DecodedSignal> { None }
+    fn from_flipper_key(&self, key: &FlipperKey) -> Option<DecodedSignal> {
+        if key.bits != MIN_COUNT_BIT {
+            return None;
+        }
+        let mut decoded = parse_data(key.key_u64()?);
+        let serial = key.u32_field("Serial")?;
+        let button = key.u32_field("Btn")?;
+        let counter = key.u32_field("Counter")?;
+        decoded.serial = Some(serial & 0xFF_FFFF);
+        decoded.button = Some(button as u8);
+        if counter != 0 {
+            decoded.counter = Some(counter as u16);
+        }
+        Some(decoded)
+    }
 
     /// `subghz_protocol_decoder_porsche_cayenne_serialize`: Key, Serial, Btn, Counter, Cnt.
-    fn to_flipper_key(&self, decoded: &DecodedSignal) -> Option<FlipperKey> { None }
+    fn to_flipper_key(&self, decoded: &DecodedSignal) -> Option<FlipperKey> {
+        if decoded.data_count_bit != MIN_COUNT_BIT {
+            return None;
+        }
+        let parsed = parse_data(decoded.data);
+        let serial = decoded.serial.or(parsed.serial)? & 0xFF_FFFF;
+        let button = decoded.button.or(parsed.button)?;
+        let counter = u32::from(decoded.counter.or(parsed.counter).unwrap_or(0));
+        let mut key = FlipperKey::for_protocol("Porsche AG", MIN_COUNT_BIT, decoded.data);
+        key.push_u32("Serial", serial);
+        key.push_u32("Btn", button.into());
+        key.push_u32("Counter", counter);
+        key.push_u32("Cnt", counter);
+        Some(key)
+    }
 }
 
 impl Default for PorscheCayenneDecoder {

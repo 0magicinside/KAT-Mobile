@@ -250,16 +250,46 @@ impl ProtocolDecoder for VagPoloDecoder {
         None
     }
 
-    fn supports_encoding(&self) -> bool { false }
+    fn supports_encoding(&self) -> bool {
+        false
+    }
 
-    fn encode(&self, _decoded: &DecodedSignal, _button: u8) -> Option<Vec<LevelDuration>> { None }
+    fn encode(&self, _decoded: &DecodedSignal, _button: u8) -> Option<Vec<LevelDuration>> {
+        None
+    }
 
     /// `subghz_protocol_decoder_vag_polo_deserialize`: `Bit: 80`; `Serial`, `Btn` and `Hdr` are
     /// read as the C does (a missing line reads 0).
-    fn from_flipper_key(&self, key: &FlipperKey) -> Option<DecodedSignal> { None }
+    fn from_flipper_key(&self, key: &FlipperKey) -> Option<DecodedSignal> {
+        if key.bits != usize::from(DATA_BITS) {
+            return None;
+        }
+        Some(DecodedSignal {
+            serial: Some(key.u32_field("Serial").unwrap_or(0)),
+            button: Some(key.u32_field("Btn").unwrap_or(0) as u8),
+            counter: None,
+            crc_valid: false,
+            data: key.key,
+            data_count_bit: usize::from(DATA_BITS),
+            encoder_capable: false,
+            extra: Some(u64::from(key.u32_field("Hdr").unwrap_or(0) as u16)),
+            protocol_display_name: None,
+        })
+    }
 
     /// `subghz_protocol_decoder_vag_polo_serialize`.
-    fn to_flipper_key(&self, decoded: &DecodedSignal) -> Option<FlipperKey> { None }
+    fn to_flipper_key(&self, decoded: &DecodedSignal) -> Option<FlipperKey> {
+        if decoded.data_count_bit != usize::from(DATA_BITS) {
+            return None;
+        }
+        let hdr = decoded.extra? as u32;
+        let mut key = FlipperKey::for_protocol(NAME, usize::from(DATA_BITS), decoded.data);
+        key.push_u32("Serial", decoded.serial?);
+        key.push_u32("Btn", decoded.button?.into());
+        key.push_u32("ButtonRaw", hdr >> 8);
+        key.push_u32("Hdr", hdr);
+        Some(key)
+    }
 }
 
 /// Synthetic captures for the tests.

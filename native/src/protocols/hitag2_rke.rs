@@ -275,16 +275,41 @@ impl ProtocolDecoder for Hitag2RkeDecoder {
         out
     }
 
-    fn supports_encoding(&self) -> bool { false }
+    fn supports_encoding(&self) -> bool {
+        false
+    }
 
-    fn encode(&self, _decoded: &DecodedSignal, _button: u8) -> Option<Vec<LevelDuration>> { None }
+    fn encode(&self, _decoded: &DecodedSignal, _button: u8) -> Option<Vec<LevelDuration>> {
+        None
+    }
 
     /// Rebuilds the frame from `Key` (UID, button, counter, top 18 keystream bits) and `Ks` (the
     /// keystream), recomputing the check byte; the same plausibility rules as the decoder apply.
-    fn from_flipper_key(&self, key: &FlipperKey) -> Option<DecodedSignal> { None }
+    fn from_flipper_key(&self, key: &FlipperKey) -> Option<DecodedSignal> {
+        if key.bits != DATA_BITS {
+            return None;
+        }
+        let ks = key.u32_field("Ks")?;
+        let uid = (key.key >> 32) as u32;
+        let btn = ((key.key >> 28) & 0xF) as u8;
+        let lctr = ((key.key >> 18) & 0x3FF) as u16;
+        if u64::from(ks >> 14) != key.key & 0x3FFFF || uid == 0 || uid == 0xFFFF_FFFF {
+            return None;
+        }
+        if (lctr == 0 && ks == 0) || (lctr == 0x3FF && ks == 0xFFFF_FFFF) {
+            return None;
+        }
+        // The XOR of the ten bytes from the marker's last bit: 1 | UID | btn | lctr | ks | 0.
+        let chk = frame_check(uid, btn, lctr, ks);
+        Some(signal(uid, btn, lctr, ks, chk))
+    }
 
     /// The decoder's `serialize`: the generic block plus `Ks`.
-    fn to_flipper_key(&self, d: &DecodedSignal) -> Option<FlipperKey> { None }
+    fn to_flipper_key(&self, d: &DecodedSignal) -> Option<FlipperKey> {
+        let mut key = FlipperKey::for_protocol(NAME, d.data_count_bit, d.data);
+        key.push_u32("Ks", d.extra? as u32);
+        Some(key)
+    }
 }
 
 /// The check byte of a frame: XOR of the ten bytes starting at the marker's last bit (a 1), then

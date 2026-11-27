@@ -272,16 +272,39 @@ impl ProtocolDecoder for MitsubishiV1Decoder {
         None
     }
 
-    fn supports_encoding(&self) -> bool { false }
+    fn supports_encoding(&self) -> bool {
+        true
+    }
 
     /// The captured frame again (see the module doc): the fob's press, whatever the button.
-    fn encode(&self, decoded: &DecodedSignal, _button: u8) -> Option<Vec<LevelDuration>> { None }
+    fn encode(&self, decoded: &DecodedSignal, _button: u8) -> Option<Vec<LevelDuration>> {
+        (decoded.data_count_bit == DATA_BITS).then(|| upload(&frame_bits(decoded)))
+    }
 
     /// `subghz_protocol_decoder_mitsubishi_v1_deserialize`: Bit 96, the Key and the hop words.
-    fn from_flipper_key(&self, key: &FlipperKey) -> Option<DecodedSignal> { None }
+    fn from_flipper_key(&self, key: &FlipperKey) -> Option<DecodedSignal> {
+        if key.bits != DATA_BITS {
+            return None;
+        }
+        let data = key.key_u64()?;
+        let hop = (u64::from(key.u32_field("HopHi").unwrap_or(0)) << 32) | u64::from(key.u32_field("HopLo").unwrap_or(0));
+        Some(signal(data, hop))
+    }
 
     /// `subghz_protocol_decoder_mitsubishi_v1_serialize`: Key, then Fix, Btn, Cnt, HopHi, HopLo.
-    fn to_flipper_key(&self, decoded: &DecodedSignal) -> Option<FlipperKey> { None }
+    fn to_flipper_key(&self, decoded: &DecodedSignal) -> Option<FlipperKey> {
+        if decoded.data_count_bit != DATA_BITS {
+            return None;
+        }
+        let hop = decoded.extra.unwrap_or(0);
+        let mut key = FlipperKey::for_protocol("Mitsubishi V1", DATA_BITS, decoded.data);
+        key.push_u32("Fix", ((decoded.data >> 24) & 0xFF) as u32);
+        key.push_u32("Btn", ((decoded.data >> 20) & 0x0F) as u32);
+        key.push_u32("Cnt", ((decoded.data >> 10) & 0x3FF) as u32);
+        key.push_u32("HopHi", (hop >> 32) as u32);
+        key.push_u32("HopLo", hop as u32);
+        Some(key)
+    }
 }
 
 #[cfg(test)]

@@ -272,21 +272,52 @@ impl ProtocolDecoder for ContinentalKr5v2xDecoder {
         self.rx.feed(&mut Decode(decode), false, RESET_US + 1)
     }
 
-    fn supports_encoding(&self) -> bool { false }
+    fn supports_encoding(&self) -> bool {
+        false
+    }
 
     /// None: rtl_433 has no encoder and FoxFW's plugin refuses every key (see "Encoder").
-    fn encode(&self, _decoded: &DecodedSignal, _button: u8) -> Option<Vec<LevelDuration>> { None }
+    fn encode(&self, _decoded: &DecodedSignal, _button: u8) -> Option<Vec<LevelDuration>> {
+        None
+    }
 
     /// FoxFW's `subghz_protocol_decoder_continental_rke_deserialize` (`Bit: 64`), plus KAT's `Raw`
     /// line (see "Key files"): with `Raw`, the decode of the whole frame, which must start with the
     /// key's 8 bytes and pass the checks; without it, the decode of bytes 0..7 alone (FoxFW's own
     /// files).
-    fn from_flipper_key(&self, key: &FlipperKey) -> Option<DecodedSignal> { None }
+    fn from_flipper_key(&self, key: &FlipperKey) -> Option<DecodedSignal> {
+        if key.bits != KEY_BITS {
+            return None;
+        }
+        let k = key.key_u64()?;
+        if key.field("Raw").is_some() {
+            let raw: [u8; 14] = key.hex_bytes_field("Raw")?.try_into().ok()?;
+            return (raw[..8] == k.to_be_bytes()).then(|| check(&raw)).flatten();
+        }
+        let mut d = DecodedSignal::new(k, KEY_BITS);
+        d.serial = Some((k >> 32) as u32);
+        d.button = Some((k >> 20) as u8 & 0xF);
+        Some(d)
+    }
 
     /// FoxFW's `subghz_protocol_decoder_common_serialize` of the frame (`Bit: 64`, `Key` = bytes
     /// 0..7, `data`), for a received frame or one loaded from such a file; for a whole frame, then
     /// `Raw` = its 14 bytes (KAT's line, see "Key files").
-    fn to_flipper_key(&self, d: &DecodedSignal) -> Option<FlipperKey> { None }
+    fn to_flipper_key(&self, d: &DecodedSignal) -> Option<FlipperKey> {
+        if ![FRAME_BITS, KEY_BITS].contains(&d.data_count_bit) {
+            return None;
+        }
+        let mut key = FlipperKey::for_protocol(FOXFW_NAME, KEY_BITS, d.data);
+        if let (FRAME_BITS, Some(extra)) = (d.data_count_bit, d.extra) {
+            let mut raw = [0u8; 14];
+            raw[..8].copy_from_slice(&d.data.to_be_bytes());
+            raw[8..].copy_from_slice(&extra.to_be_bytes()[2..]);
+            if extra >> 48 == 0 && check(&raw).is_some() {
+                key.push_hex_bytes("Raw", &raw);
+            }
+        }
+        Some(key)
+    }
 }
 
 /// rtl_433's JSON fields of a decode, rebuilt from KAT's (the field mapping, for the parity tests).

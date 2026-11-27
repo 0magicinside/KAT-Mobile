@@ -230,9 +230,24 @@ impl ProtocolDecoder for KiaV2Decoder {
         None
     }
 
-    fn supports_encoding(&self) -> bool { false }
+    fn supports_encoding(&self) -> bool {
+        true
+    }
 
-    fn encode(&self, decoded: &DecodedSignal, button: u8) -> Option<Vec<LevelDuration>> { None }
+    fn encode(&self, decoded: &DecodedSignal, button: u8) -> Option<Vec<LevelDuration>> {
+        let parsed = parse_frame(decoded.data);
+        let serial = decoded.serial.or(parsed.serial)?;
+        let captured = decoded.button.or(parsed.button).unwrap_or(0);
+        let counter = decoded.counter.or(parsed.counter).unwrap_or(0).wrapping_add(1) & 0x0FFF;
+        let button = match button {
+            0x01 => 0x1,
+            0x02 => 0x2,
+            0x04 => 0x3,
+            0x08 => 0x4,
+            _ => captured,
+        };
+        Some(build_upload(build_frame(serial, button, counter)))
+    }
 
     /// Key files — ProtoPirate `kia_protocol_decoder_v2_deserialize`: Bit must be 53 and the Key is
     /// decoded as the decoder reports it (bit 52, the start bit the decoder leaves clear, as
@@ -240,12 +255,42 @@ impl ProtocolDecoder for KiaV2Decoder {
     /// nothing else). ProtoPirate's encoder transmits from Serial/Btn/Cnt (start bit and CRC
     /// rebuilt): when a file's fields differ from its Key's, KAT rebuilds the frame from them the
     /// same way (start bit clear, as the decoder then reports it).
-    fn from_flipper_key(&self, key: &super::FlipperKey) -> Option<DecodedSignal> { None }
+    fn from_flipper_key(&self, key: &super::FlipperKey) -> Option<DecodedSignal> {
+        if key.bits != MIN_COUNT_BIT {
+            return None;
+        }
+        let d = parse_frame(key.key_u64()?);
+        let (serial, button, counter) = (key.u32_field("Serial"), key.u32_field("Btn"), key.u32_field("Cnt"));
+        if serial.is_none() && button.is_none() && counter.is_none() {
+            return Some(d);
+        }
+        let fields = (
+            serial.or(d.serial)?,
+            button.map_or(d.button, |b| Some((b & 0x0F) as u8))?,
+            counter.map_or(d.counter, |c| Some((c & 0x0FFF) as u16))?,
+        );
+        if fields == (d.serial?, d.button?, d.counter?) {
+            return Some(d);
+        }
+        Some(parse_frame(build_frame(fields.0, fields.1, fields.2) & !(1 << 52)))
+    }
 
     /// Key files — ProtoPirate `kia_protocol_decoder_v2_serialize`: "Kia V2", 53 bits, Key, then
     /// Serial, Btn, Cnt (`pp_serialize_fields`), CRC (the frame's low nibble) and RawCnt (bits
     /// 4..15), all decimal.
-    fn to_flipper_key(&self, decoded: &DecodedSignal) -> Option<super::FlipperKey> { None }
+    fn to_flipper_key(&self, decoded: &DecodedSignal) -> Option<super::FlipperKey> {
+        if decoded.data_count_bit != MIN_COUNT_BIT {
+            return None;
+        }
+        let f = parse_frame(decoded.data);
+        let mut key = super::FlipperKey::for_protocol("Kia V2", MIN_COUNT_BIT, decoded.data);
+        key.push_u32("Serial", f.serial?);
+        key.push_u32("Btn", f.button?.into());
+        key.push_u32("Cnt", f.counter?.into());
+        key.push_u32("CRC", (decoded.data & 0x0F) as u32);
+        key.push_u32("RawCnt", ((decoded.data >> 4) & 0xFFF) as u32);
+        Some(key)
+    }
 }
 
 impl Default for KiaV2Decoder {

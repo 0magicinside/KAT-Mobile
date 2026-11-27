@@ -308,19 +308,63 @@ impl ProtocolDecoder for KiaV7Decoder {
         None
     }
 
-    fn supports_encoding(&self) -> bool { false }
+    fn supports_encoding(&self) -> bool {
+        true
+    }
 
-    fn encode(&self, decoded: &DecodedSignal, button: u8) -> Option<Vec<LevelDuration>> { None }
+    fn encode(&self, decoded: &DecodedSignal, button: u8) -> Option<Vec<LevelDuration>> {
+        let serial = decoded.serial?;
+        let counter = decoded.counter.unwrap_or(0).wrapping_add(1);
+        let button = Self::map_button(button, decoded.button.unwrap_or(0));
+        Some(Self::build_upload(Self::encode_key(serial, button, counter)))
+    }
 
     /// Key files: `kia_protocol_decoder_v7_deserialize` — Bit 64; when the file has Serial/Btn/Cnt
     /// the key is rebuilt from them (header byte kept, CRC recomputed), as the C does. KAT reports
     /// only what its decoder reports: a 0x4C header and a valid CRC (else None).
-    fn from_flipper_key(&self, key: &FlipperKey) -> Option<DecodedSignal> { None }
+    fn from_flipper_key(&self, key: &FlipperKey) -> Option<DecodedSignal> {
+        if key.bits != KEY_BITS {
+            return None;
+        }
+        let mut data = key.key_u64()?;
+        if (data >> 56) as u8 != HEADER {
+            return None;
+        }
+        let (serial, button, counter) = (key.u32_field("Serial"), key.u32_field("Btn"), key.u32_field("Cnt"));
+        if serial.is_some() || button.is_some() || counter.is_some() {
+            let (s, b, c, _) = Self::decode_key(data);
+            data = Self::encode_key(
+                serial.unwrap_or(s),
+                button.map_or(b, |b| b as u8),
+                counter.map_or(c, |c| c as u16),
+            );
+        }
+        Self::frame_signal(data)
+    }
 
     /// Key files: `kia_protocol_decoder_v7_serialize` — "Kia V7", 64 bits, Key, then Serial, Btn,
     /// Cnt (`pp_serialize_fields`), `Repeat: 3` and ProtoPirate's display line
     /// (`Disp: Kia V7 - <button>`, `pp_write_display`).
-    fn to_flipper_key(&self, decoded: &DecodedSignal) -> Option<FlipperKey> { None }
+    fn to_flipper_key(&self, decoded: &DecodedSignal) -> Option<FlipperKey> {
+        if decoded.data_count_bit != KEY_BITS {
+            return None;
+        }
+        let (serial, button, counter, _) = Self::decode_key(decoded.data);
+        let mut key = FlipperKey::for_protocol("Kia V7", KEY_BITS, decoded.data);
+        key.push_u32("Serial", serial);
+        key.push_u32("Btn", button.into());
+        key.push_u32("Cnt", counter.into());
+        key.push_u32("Repeat", 3);
+        // kia_v7_get_button_name
+        let label = match button {
+            0x01 => "Lock",
+            0x02 => "Unlock",
+            0x03 | 0x08 => "Trunk",
+            _ => "??",
+        };
+        key.push("Disp", format!("Kia V7 - {label}"));
+        Some(key)
+    }
 }
 
 impl KiaV7Decoder {

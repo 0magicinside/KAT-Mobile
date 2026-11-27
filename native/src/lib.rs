@@ -10,6 +10,7 @@ mod radio {
     pub mod preset;
     pub mod dsp;
     pub mod pipeline;
+    pub mod tx;
     pub mod demodulator {
         #[derive(Debug,Clone,Copy,PartialEq,Eq)]
         pub struct LevelDuration {pub level:bool,pub duration_us:u32}
@@ -37,7 +38,16 @@ pub struct ProtocolEntry {pub name:String,pub rf:String,pub coding:String,pub fo
 pub struct Recognition {pub name:String,pub bits:usize,pub integrity:String}
 
 static ENGINE:OnceLock<Mutex<ProtocolRegistry>>=OnceLock::new();
-fn engine()->&'static Mutex<ProtocolRegistry>{ENGINE.get_or_init(||Mutex::new(ProtocolRegistry::new()))}
+fn engine()->&'static Mutex<ProtocolRegistry>{ENGINE.get_or_init(||Mutex::new(new_registry()))}
+
+/// A registry with KAT's embedded keys loaded first, as desktop KAT loads them at start
+/// (`App::new`): the Kia V3/V4, V5 and V6, VAG, PSA, Ford V1, BMW V3, Audi V3 and AUT64 decoders
+/// decrypt with them, and their encoders encrypt with them.
+pub(crate) fn new_registry()->ProtocolRegistry{
+    static KEYS:std::sync::Once=std::sync::Once::new();
+    KEYS.call_once(protocols::keys::load_keystore_from_embedded);
+    ProtocolRegistry::new()
+}
 
 pub fn catalog()->Vec<ProtocolEntry>{
     let registry=engine().lock().unwrap_or_else(|e|e.into_inner());
@@ -48,14 +58,16 @@ pub fn catalog()->Vec<ProtocolEntry>{
     }).collect()
 }
 
-/// Only format identity is exported. No keys, counters, serials, plaintext payloads or encoders.
+/// Format identity only: no keys, counters, serials or payloads ([mobile_tx::decode] has those).
 pub fn identify(durations:&[i32],frequency:u64,fm:bool)->Result<Vec<Recognition>,String>{
-    identify_impl(durations,frequency,fm,false)
+    Ok(scan(durations,frequency,fm,false)?.into_iter().map(|(r,_,_)|r).collect())
 }
 pub fn identify_receive(durations:&[i32],frequency:u64,fm:bool)->Result<Vec<Recognition>,String>{
-    identify_impl(durations,frequency,fm,true)
+    Ok(scan(durations,frequency,fm,true)?.into_iter().map(|(r,_,_)|r).collect())
 }
-fn identify_impl(durations:&[i32],frequency:u64,fm:bool,receive_path:bool)->Result<Vec<Recognition>,String>{
+/// The protocols that read a burst, one per decoder: its identity, and the decode with the name
+/// KAT gives the capture (the decode's display name, e.g. "KeeLoq (DoorHan)").
+fn scan(durations:&[i32],frequency:u64,fm:bool,receive_path:bool)->Result<Vec<(Recognition,String,protocols::DecodedSignal)>,String>{
     if durations.len()>32768||frequency>u32::MAX as u64{return Err("Input outside decoder bounds".into())}
     let mut pulses=Vec::with_capacity(durations.len());
     for &value in durations {
@@ -67,22 +79,24 @@ fn identify_impl(durations:&[i32],frequency:u64,fm:bool,receive_path:bool)->Resu
     registry.set_auto_key_search(false);
     let modulation=Some(if fm{capture::RfModulation::FM}else{capture::RfModulation::AM});
     let decoded=if receive_path{registry.process_signal_stream_path(&pulses,frequency as u32,modulation)}else{registry.process_signal_stream_rf(&pulses,frequency as u32,modulation)};
-    let mut results=Vec::new();
+    let mut results:Vec<(Recognition,String,protocols::DecodedSignal)>=Vec::new();
     for (name,data,_) in decoded {
         if name.contains("unchecked"){continue}
-        // Dynamic manufacturer/key labels never cross the JNI boundary.
+        // The listed name is the decoder's; the manufacturer or key in a display name stays in the decode.
         let canonical=protocols::protocol_info(&name).map(|i|i.decoder.to_string())
             .unwrap_or_else(||name.split(" (").next().unwrap_or("Unknown").to_string());
         if canonical.contains("unchecked"){continue}
         let checksum=protocols::has_checksum_for(&name,data.data_count_bit,data.extra);
         if checksum&&!data.crc_valid{continue}
-        if results.iter().any(|r:&Recognition|r.name==canonical){continue}
-        results.push(Recognition{name:canonical,bits:data.data_count_bit,
-            integrity:if checksum{"CRC/check OK"}else{"Format match; no checksum"}.into()});
+        if results.iter().any(|(r,_,_)|r.name==canonical){continue}
+        results.push((Recognition{name:canonical,bits:data.data_count_bit,
+            integrity:if checksum{"CRC/check OK"}else{"Format match; no checksum"}.into()},name,data));
         if results.len()==16{break}
     }
     Ok(results)
 }
+
+pub mod mobile_tx;
 
 use jni::{JNIEnv,objects::{JClass,JIntArray},sys::{jstring,jlong,jboolean}};
 
@@ -98,7 +112,7 @@ pub extern "system" fn Java_app_katmobile_NativeDecoder_nativeIdentify(env:JNIEn
         let len=env.get_array_length(&input).map_err(|e|e.to_string())? as usize;
         if len>32768||frequency<0{return Err("Invalid input".to_string())}
         let mut values=vec![0i32;len];env.get_int_array_region(&input,0,&mut values).map_err(|e|e.to_string())?;
-        identify_impl(&values,frequency as u64,fm!=0,receive_path!=0)
+        if receive_path!=0{identify_receive(&values,frequency as u64,fm!=0)}else{identify(&values,frequency as u64,fm!=0)}
     })).unwrap_or_else(|_|Err("Decoder input was rejected".into()));
     let json=match result{Ok(found)=>serde_json::to_string(&found).unwrap_or_else(|_|"[]".into()),Err(_)=>"[]".into()};
     env.new_string(json).map(|s|s.into_raw()).unwrap_or(std::ptr::null_mut())
@@ -107,5 +121,5 @@ pub extern "system" fn Java_app_katmobile_NativeDecoder_nativeIdentify(env:JNIEn
 #[no_mangle]
 pub extern "system" fn Java_app_katmobile_NativeDecoder_nativeReset(_env:JNIEnv,_class:JClass){
     let mut registry=engine().lock().unwrap_or_else(|e|e.into_inner());
-    *registry=ProtocolRegistry::new();
+    *registry=new_registry();
 }

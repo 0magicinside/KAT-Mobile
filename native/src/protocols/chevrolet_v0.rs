@@ -343,16 +343,38 @@ impl ProtocolDecoder for ChevroletV0Decoder {
         self.burst_ended(&halves)
     }
 
-    fn supports_encoding(&self) -> bool { false }
+    fn supports_encoding(&self) -> bool {
+        false
+    }
 
-    fn encode(&self, _decoded: &DecodedSignal, _button: u8) -> Option<Vec<LevelDuration>> { None }
+    fn encode(&self, _decoded: &DecodedSignal, _button: u8) -> Option<Vec<LevelDuration>> {
+        None
+    }
 
     /// `subghz_protocol_decoder_chevrolet_v0_deserialize`: `Bit: 96`; the fields come from `Key`,
     /// `Seed` is read when present (else 0).
-    fn from_flipper_key(&self, key: &FlipperKey) -> Option<DecodedSignal> { None }
+    fn from_flipper_key(&self, key: &FlipperKey) -> Option<DecodedSignal> {
+        if key.bits != usize::from(DATA_BITS) {
+            return None;
+        }
+        Some(signal(key.key, key.u32_field("Seed").unwrap_or(0)))
+    }
 
     /// `subghz_protocol_decoder_chevrolet_v0_serialize`.
-    fn to_flipper_key(&self, decoded: &DecodedSignal) -> Option<FlipperKey> { None }
+    fn to_flipper_key(&self, decoded: &DecodedSignal) -> Option<FlipperKey> {
+        if decoded.data_count_bit != usize::from(DATA_BITS) {
+            return None;
+        }
+        let gdata = decoded.data;
+        let hop = gdata & 0xF_FFFF_FFFF;
+        let mut key = FlipperKey::for_protocol(NAME, usize::from(DATA_BITS), gdata);
+        key.push_u32("Serial", serial_of(gdata));
+        key.push_u32("Btn", button_of(gdata).into());
+        key.push_u32("HopHi", (hop >> 32) as u32);
+        key.push_u32("HopLo", (hop & 0xFFFF_FFFF) as u32);
+        key.push_u32("Seed", decoded.extra? as u32);
+        Some(key)
+    }
 }
 
 /// Synthetic captures for the tests.

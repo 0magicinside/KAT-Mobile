@@ -923,15 +923,48 @@ impl ProtocolDecoder for MazdaV2Decoder {
         result
     }
 
-    fn supports_encoding(&self) -> bool { false }
+    fn supports_encoding(&self) -> bool {
+        true
+    }
 
-    fn encode(&self, decoded: &DecodedSignal, button: u8) -> Option<Vec<LevelDuration>> { None }
+    fn encode(&self, decoded: &DecodedSignal, button: u8) -> Option<Vec<LevelDuration>> {
+        if decoded.data_count_bit != MIN_COUNT_BIT {
+            return None;
+        }
+        let data = Self::next_key(decoded.data, button);
+        let mut signal =
+            Vec::with_capacity(REPEAT_DEFAULT * (PREAMBLE_PAIRS * 2 + PAYLOAD_BITS * 2 + 3));
+        for _ in 0..REPEAT_DEFAULT {
+            Self::append_upload(&mut signal, data);
+        }
+        Some(signal)
+    }
 
     /// `subghz_protocol_decoder_mazda_v2_deserialize`: a 63-bit key, split into fields.
-    fn from_flipper_key(&self, key: &FlipperKey) -> Option<DecodedSignal> { None }
+    fn from_flipper_key(&self, key: &FlipperKey) -> Option<DecodedSignal> {
+        if key.bits != MIN_COUNT_BIT {
+            return None;
+        }
+        Some(Self::signal_from_value(key.key_u64()?))
+    }
 
     /// `subghz_protocol_decoder_mazda_v2_serialize`: Key, then `Hdr` and the `Disp` line.
-    fn to_flipper_key(&self, decoded: &DecodedSignal) -> Option<FlipperKey> { None }
+    fn to_flipper_key(&self, decoded: &DecodedSignal) -> Option<FlipperKey> {
+        if decoded.data_count_bit != MIN_COUNT_BIT {
+            return None;
+        }
+        let (_hop, _idx, hdr, button) = Self::extract(decoded.data);
+        let name = match Self::btn7(button) {
+            BTN_LOCK | BTN_LOCK_ALT => "Lock",
+            BTN_UNLOCK | BTN_UNLOCK_ALT => "Unlock",
+            BTN_TRUNK | BTN_TRUNK_ALT => "Trunk",
+            _ => "Unknown",
+        };
+        let mut key = FlipperKey::for_protocol("Mazda V2", MIN_COUNT_BIT, decoded.data);
+        key.push_u32("Hdr", hdr.into());
+        key.push("Disp", format!("Mazda V2 - {name}"));
+        Some(key)
+    }
 }
 
 impl Default for MazdaV2Decoder {

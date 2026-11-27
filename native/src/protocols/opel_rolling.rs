@@ -307,9 +307,16 @@ impl ProtocolDecoder for OpelRollingDecoder {
         out
     }
 
-    fn supports_encoding(&self) -> bool { false }
+    fn supports_encoding(&self) -> bool {
+        true
+    }
 
-    fn encode(&self, decoded: &DecodedSignal, button: u8) -> Option<Vec<LevelDuration>> { None }
+    fn encode(&self, decoded: &DecodedSignal, button: u8) -> Option<Vec<LevelDuration>> {
+        if decoded.data_count_bit != FRAME_BITS {
+            return None;
+        }
+        Some(upload(Fields::parse(decoded.data)?.next(button).frame()))
+    }
 }
 
 #[cfg(test)]

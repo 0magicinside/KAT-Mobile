@@ -297,13 +297,54 @@ impl ProtocolDecoder for PhoenixV2Decoder {
         None
     }
 
-    fn supports_encoding(&self) -> bool { false }
+    fn supports_encoding(&self) -> bool {
+        true
+    }
 
-    fn encode(&self, decoded: &DecodedSignal, button: u8) -> Option<Vec<LevelDuration>> { None }
+    fn encode(&self, decoded: &DecodedSignal, button: u8) -> Option<Vec<LevelDuration>> {
+        if decoded.data_count_bit != BIT_COUNT {
+            return None;
+        }
+        let (_, captured_button, captured_counter) = fields(decoded.data);
+        let button = if BUTTONS.contains(&captured_button) && BUTTONS.contains(&button) {
+            button
+        } else {
+            captured_button
+        };
+        let counter = next_counter(
+            decoded.counter.unwrap_or(captured_counter),
+            decoded.extra.unwrap_or(0),
+        );
+        Some(repeat_upload(
+            &upload(build_key(decoded.data, button, counter)),
+            REPEAT,
+        ))
+    }
 
-    fn from_flipper_key(&self, key: &FlipperKey) -> Option<DecodedSignal> { None }
+    fn from_flipper_key(&self, key: &FlipperKey) -> Option<DecodedSignal> {
+        if key.bits != BIT_COUNT {
+            return None;
+        }
+        let mode = key.u32_field("CounterMode").map(|m| u64::from(m as u8));
+        Some(signal(key.key, mode))
+    }
 
-    fn to_flipper_key(&self, decoded: &DecodedSignal) -> Option<FlipperKey> { None }
+    fn to_flipper_key(&self, decoded: &DecodedSignal) -> Option<FlipperKey> {
+        if decoded.data_count_bit != BIT_COUNT {
+            return None;
+        }
+        let mut k = FlipperKey::new(
+            "Phoenix_V2",
+            BIT_COUNT,
+            decoded.data,
+            433_920_000,
+            "FuriHalSubGhzPresetOok650Async",
+        );
+        if let Some(mode) = decoded.extra {
+            k.push("CounterMode", mode.to_string());
+        }
+        Some(k)
+    }
 }
 
 #[cfg(test)]

@@ -203,15 +203,32 @@ impl ProtocolDecoder for RenaultV2Decoder {
         None
     }
 
-    fn supports_encoding(&self) -> bool { false }
+    fn supports_encoding(&self) -> bool {
+        false
+    }
 
-    fn encode(&self, _decoded: &DecodedSignal, _button: u8) -> Option<Vec<LevelDuration>> { None }
+    fn encode(&self, _decoded: &DecodedSignal, _button: u8) -> Option<Vec<LevelDuration>> {
+        None
+    }
 
     /// `subghz_protocol_decoder_renault_v2_deserialize` (see "Key files").
-    fn from_flipper_key(&self, key: &FlipperKey) -> Option<DecodedSignal> { None }
+    fn from_flipper_key(&self, key: &FlipperKey) -> Option<DecodedSignal> {
+        if key.bits != DATA_BITS {
+            return None;
+        }
+        let tail = key.u32_field("Data2").unwrap_or(0) & 0x3_FFFF;
+        Some(signal(key.key_u64()?, tail as u64))
+    }
 
     /// `subghz_protocol_decoder_renault_v2_serialize`.
-    fn to_flipper_key(&self, decoded: &DecodedSignal) -> Option<FlipperKey> { None }
+    fn to_flipper_key(&self, decoded: &DecodedSignal) -> Option<FlipperKey> {
+        if decoded.data_count_bit != DATA_BITS {
+            return None;
+        }
+        let mut key = FlipperKey::for_protocol("Renault V2", DATA_BITS, decoded.data);
+        key.push_u32("Data2", decoded.extra? as u32);
+        Some(key)
+    }
 }
 
 #[cfg(test)]

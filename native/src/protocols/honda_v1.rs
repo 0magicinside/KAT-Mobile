@@ -516,15 +516,89 @@ impl ProtocolDecoder for HondaV1Decoder {
         result.or(low_result)
     }
 
-    fn supports_encoding(&self) -> bool { false }
+    fn supports_encoding(&self) -> bool {
+        true
+    }
 
-    fn encode(&self, decoded: &DecodedSignal, button: u8) -> Option<Vec<LevelDuration>> { None }
+    fn encode(&self, decoded: &DecodedSignal, button: u8) -> Option<Vec<LevelDuration>> {
+        // subghz_block_generic_deserialize_check_count_bit(.., 68) + honda_v1_decode_fields(Key),
+        // then the file's Serial/Btn/Cnt (Cnt = counter + 1 from the emulate scene).
+        if decoded.data_count_bit != BIT_COUNT {
+            return None;
+        }
+        let (key_serial, key_button, key_counter) = Self::decode_fields(decoded.data);
+        let serial = decoded.serial.unwrap_or(key_serial) & SERIAL_MASK;
+        let btn = Self::map_button(button, decoded.button.unwrap_or(key_button), key_button);
+        let counter = decoded.counter.unwrap_or(key_counter).wrapping_add(1) & COUNTER_MASK;
+        let data = Self::build_key(serial, btn, counter);
+
+        let mut frame = [0u8; 9];
+        frame[0..8].copy_from_slice(&data.to_be_bytes());
+        let (first, second) = Self::checksum_wire_order(data);
+
+        let mut signal: Vec<LevelDuration> = Vec::with_capacity(PREAMBLE_UPLOAD_COUNT + 8 * FRAME_SYMBOLS);
+
+        // Preamble: 180 short entries (90 H/L pairs); the final LOW becomes a 5000µs gap.
+        for _ in 0..(PREAMBLE_UPLOAD_COUNT / 2) {
+            signal.push(LevelDuration::new(true, TE_SHORT));
+            signal.push(LevelDuration::new(false, TE_SHORT));
+        }
+        if let Some(last) = signal.last_mut() {
+            *last = LevelDuration::new(false, FRAME_GAP_US);
+        }
+
+        // 4 frames: 2 per checksum wire value (first, then second).
+        for &crc in &[first, second] {
+            frame[FRAME_CRC_INDEX] = crc << 4;
+            for _ in 0..FRAME_REPEAT_PER_CRC {
+                Self::append_frame(&mut signal, &frame);
+            }
+        }
+
+        Some(signal)
+    }
 
     /// `subghz_protocol_decoder_honda_v1_deserialize` (see the module doc, Key files).
-    fn from_flipper_key(&self, key: &FlipperKey) -> Option<DecodedSignal> { None }
+    fn from_flipper_key(&self, key: &FlipperKey) -> Option<DecodedSignal> {
+        if key.bits != BIT_COUNT {
+            return None;
+        }
+        let data = key.key_u64()?;
+        let k2 = match key.u32_field("Key_2").or_else(|| key.u32_field("Crc")) {
+            Some(crc) => crc as u8 & NIBBLE_MASK,
+            None => Self::checksum_wire_order(data).0,
+        };
+        Some(Self::signal(data, k2))
+    }
 
     /// `subghz_protocol_decoder_honda_v1_serialize` (see the module doc, Key files).
-    fn to_flipper_key(&self, decoded: &DecodedSignal) -> Option<FlipperKey> { None }
+    fn to_flipper_key(&self, decoded: &DecodedSignal) -> Option<FlipperKey> {
+        if decoded.data_count_bit != BIT_COUNT {
+            return None;
+        }
+        let data = decoded.data;
+        let (serial, btn, counter) = Self::decode_fields(data);
+        let crc = if decoded.crc_valid {
+            Self::checksum_wire_order(data).0
+        } else {
+            (0..=NIBBLE_MASK).find(|&n| !Self::crc_valid(data, n))?
+        };
+        let mut key = FlipperKey::for_protocol("Honda V1", BIT_COUNT, data);
+        key.push_u32("Serial", serial);
+        key.push_u32("Btn", btn.into());
+        key.push_u32("Cnt", counter.into());
+        key.push_u32("Crc", crc.into());
+        key.push_u32("Key_2", crc.into());
+        let name = match btn {
+            BTN_CODE_UNLOCK => "Unlock",
+            BTN_CODE_LOCK => "Lock",
+            BTN_CODE_TRUNK => "Trunk",
+            BTN_CODE_PANIC => "Panic",
+            _ => "Unknown",
+        };
+        key.push("Disp", format!("Honda V1 - {name}"));
+        Some(key)
+    }
 }
 
 impl Default for HondaV1Decoder {

@@ -651,13 +651,83 @@ impl ProtocolDecoder for SecPlusV2Decoder {
         }
     }
 
-    fn supports_encoding(&self) -> bool { false }
+    fn supports_encoding(&self) -> bool {
+        true
+    }
 
-    fn encode(&self, decoded: &DecodedSignal, button: u8) -> Option<Vec<LevelDuration>> { None }
+    fn encode(&self, decoded: &DecodedSignal, button: u8) -> Option<Vec<LevelDuration>> {
+        let packet_1 = decoded.extra?;
+        let mut out = Vec::new();
+        match decoded.data_count_bit {
+            62 => {
+                let (counter, serial) =
+                    fields_62(packet_1, decoded.data).map_or((0, 0), |f| (f.counter, f.serial));
+                let (p1, p2) = encode_62(serial, button, next_counter(counter));
+                for _ in 0..REPEAT_62 {
+                    push_packet(&mut out, p1, BITS_62 as u32, None, GAP_62);
+                    push_packet(&mut out, p2, BITS_62 as u32, None, GAP_62);
+                }
+            }
+            86 => {
+                let f = fields_86(packet_1, decoded.data)?;
+                let (p1, p2) = encode_86(f.serial, button, next_counter(f.counter), f.data_word);
+                for _ in 0..REPEAT_86 {
+                    push_packet(&mut out, p2, 64, Some(PREAMBLE_86 | 1), GAP_86);
+                    push_packet(&mut out, p1, 64, Some(PREAMBLE_86), GAP_86);
+                }
+            }
+            _ => return None,
+        }
+        Some(out)
+    }
 
-    fn from_flipper_key(&self, key: &FlipperKey) -> Option<DecodedSignal> { None }
+    fn from_flipper_key(&self, key: &FlipperKey) -> Option<DecodedSignal> {
+        let bits = match key.bits {
+            62 => BITS_62,
+            86 => BITS_86,
+            _ => return None,
+        };
+        let mut packet_1 = key.hex_field("Secplus_packet_1")?;
+        let mut packet_2 = key.key;
+        let mut fields = fields_for(packet_1, packet_2, bits);
+        if let (Some(f), Some(pin)) = (fields.as_ref().filter(|_| bits == BITS_86), pin_read(key)) {
+            // doctor-firmware's encoder transmits the file's PIN: rebuild the packets with it.
+            if pin_extract(f.data_word) != Some(pin) {
+                (packet_1, packet_2) =
+                    encode_86(f.serial, f.button, f.counter, pin_apply(f.data_word, pin));
+                fields = fields_86(packet_1, packet_2);
+            }
+        }
+        Some(decoded(packet_1, packet_2, bits, fields.as_ref()))
+    }
 
-    fn to_flipper_key(&self, decoded: &DecodedSignal) -> Option<FlipperKey> { None }
+    fn to_flipper_key(&self, decoded: &DecodedSignal) -> Option<FlipperKey> {
+        let packet_1 = decoded.extra?;
+        let preset = "FuriHalSubGhzPresetOok650Async";
+        match decoded.data_count_bit {
+            62 => {
+                let mut key = FlipperKey::new(NAME, 62, decoded.data, 0, preset);
+                key.push_hex("Secplus_packet_1", packet_1, 8);
+                Some(key)
+            }
+            86 => {
+                let mut key = FlipperKey::new(NAME, 86, decoded.data, 0, preset);
+                let fields = fields_86(packet_1, decoded.data);
+                if let Some(f) = &fields {
+                    if f.serial != 0 || f.button != 0 || f.counter != 0 {
+                        key.push("Serial", f.serial.to_string());
+                        key.push("Btn", f.button.to_string());
+                        key.push("Cnt", f.counter.to_string());
+                    }
+                }
+                key.push_hex("Secplus_packet_1", packet_1, 8);
+                let pin = fields.and_then(|f| pin_extract(f.data_word));
+                key.push("Pin", pin.map(|p| format!("{p:04}")).unwrap_or_default());
+                Some(key)
+            }
+            _ => None,
+        }
+    }
 }
 
 #[cfg(test)]

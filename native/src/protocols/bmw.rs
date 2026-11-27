@@ -547,15 +547,72 @@ impl ProtocolDecoder for BmwDecoder {
         None
     }
 
-    fn supports_encoding(&self) -> bool { false }
+    fn supports_encoding(&self) -> bool {
+        true
+    }
 
-    fn encode(&self, decoded: &DecodedSignal, button: u8) -> Option<Vec<LevelDuration>> { None }
+    fn encode(&self, decoded: &DecodedSignal, button: u8) -> Option<Vec<LevelDuration>> {
+        if decoded.data_count_bit != PAYLOAD_BITS {
+            return None;
+        }
+        let mut hi = decoded.data;
+        let mut lo = decoded.extra?;
+        // bmw_normalize_stored_payload: a frame stored with the inverted sync is flipped back.
+        if (hi >> 48) as u16 == SYNC_INV {
+            hi = !hi;
+            lo = !lo;
+        }
+        let (serial, captured_btn, cnt, hop) = Self::parse_fields(hi, lo);
+        let btn = Self::map_button(button, captured_btn);
+        let (hi, lo) = Self::rebuild_payload(serial, btn, cnt, hop);
+
+        let mut signal =
+            Vec::with_capacity((PREAMBLE_BITS * 2 + PAYLOAD_BITS * 2 + 1) * REPEAT_DEFAULT);
+        for _ in 0..REPEAT_DEFAULT {
+            Self::append_frame(&mut signal, hi, lo, PREAMBLE_BITS);
+        }
+        Some(signal)
+    }
 
     /// `subghz_protocol_decoder_bmw_deserialize` (see the module doc, "Key files").
-    fn from_flipper_key(&self, key: &FlipperKey) -> Option<DecodedSignal> { None }
+    fn from_flipper_key(&self, key: &FlipperKey) -> Option<DecodedSignal> {
+        if key.bits != PAYLOAD_BITS {
+            return None;
+        }
+        let mut hi = key.key_u64()?;
+        let mut lo = key.hex_field("Key_2").or_else(|| key.hex_field("Key2")).unwrap_or(0);
+        if (hi >> 48) as u16 == SYNC_INV {
+            hi = !hi;
+            lo = !lo;
+        }
+        Some(Self::frame_signal(hi, lo))
+    }
 
     /// doctor-firmware's `subghz_block_generic_serialize` of a BMW decode (see "Key files").
-    fn to_flipper_key(&self, decoded: &DecodedSignal) -> Option<FlipperKey> { None }
+    fn to_flipper_key(&self, decoded: &DecodedSignal) -> Option<FlipperKey> {
+        if decoded.data_count_bit != PAYLOAD_BITS {
+            return None;
+        }
+        let (hi, lo) = (decoded.data, decoded.extra?);
+        let (serial, btn, cnt, hop) = Self::parse_fields(hi, lo);
+        let mut key = FlipperKey::for_protocol("BMW", PAYLOAD_BITS, hi);
+        if serial != 0 || btn != 0 || cnt != 0 {
+            key.push_u32("Serial", serial);
+            key.push_u32("Btn", btn.into());
+            key.push_u32("Cnt", cnt);
+        }
+        if hi & 0xFF != 0 {
+            key.push_u32("ValidationField", (hi & 0xFF) as u32);
+        }
+        key.push_u32("TE", TE_US);
+        if lo != 0 {
+            key.push_hex("Key_2", lo, 8);
+        }
+        if hop != 0 {
+            key.push_hex("Key_3", hop, 8);
+        }
+        Some(key)
+    }
 }
 
 /// Oracle test vectors for the key-file support of the Flipper-ARF / doctor-firmware ports:

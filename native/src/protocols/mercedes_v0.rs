@@ -387,15 +387,66 @@ impl ProtocolDecoder for MercedesV0Decoder {
         None
     }
 
-    fn supports_encoding(&self) -> bool { false }
+    fn supports_encoding(&self) -> bool {
+        true
+    }
 
-    fn encode(&self, decoded: &DecodedSignal, button: u8) -> Option<Vec<LevelDuration>> { None }
+    fn encode(&self, decoded: &DecodedSignal, button: u8) -> Option<Vec<LevelDuration>> {
+        // mercedes_v0_data_valid: exact bit count + whitelisted command nibble.
+        if decoded.data_count_bit != BITS as usize {
+            return None;
+        }
+        let hi = decoded.data;
+        let lo = (decoded.extra? << 16) & LO_VALID_MASK;
+        if !Self::prefix_valid(hi) {
+            return None;
+        }
+
+        let captured = (hi >> 60) as u8;
+        let (command, selected) = Self::map_button(button, captured);
+        let tail = hi & HI_TAIL_MASK;
+
+        let burst_len = 1 + 2 * TX_PREAMBLE_BITS + 2 + 2 * BITS as usize;
+        let mut signal = Vec::with_capacity(2 * burst_len + 1);
+        Self::enc_burst(&mut signal, tail | ((command as u64) << 60), lo);
+        if selected && command == CMD_UNLOCK {
+            Self::enc_add_level(&mut signal, false, COMMAND_GAP_US);
+            Self::enc_burst(&mut signal, tail, lo);
+        }
+        Some(signal)
+    }
 
     /// `mercedes_v0_deserialize` (see the module doc, "Key files").
-    fn from_flipper_key(&self, key: &FlipperKey) -> Option<DecodedSignal> { None }
+    fn from_flipper_key(&self, key: &FlipperKey) -> Option<DecodedSignal> {
+        let hi = key.key_u64()?;
+        let lo = key.hex_field("Key_2").or_else(|| key.hex_field("Key2")).unwrap_or(0);
+        // mercedes_v0_data_valid
+        if key.bits != BITS as usize || lo & 0xFFFF != 0 || !Self::prefix_valid(hi) {
+            return None;
+        }
+        Some(Self::frame_signal(hi, lo))
+    }
 
     /// doctor-firmware's `subghz_block_generic_serialize` of the decode (see "Key files").
-    fn to_flipper_key(&self, decoded: &DecodedSignal) -> Option<FlipperKey> { None }
+    fn to_flipper_key(&self, decoded: &DecodedSignal) -> Option<FlipperKey> {
+        if decoded.data_count_bit != BITS as usize {
+            return None;
+        }
+        let hi = decoded.data;
+        let lo = (decoded.extra? << 16) & LO_VALID_MASK;
+        let command = (hi >> 60) as u32;
+        let mut key = FlipperKey::for_protocol("Mercedes V0", BITS as usize, hi);
+        if command != 0 {
+            key.push_u32("Serial", 0);
+            key.push_u32("Btn", command);
+            key.push_u32("Cnt", 0);
+        }
+        key.push_u32("TE", TE_US);
+        if lo != 0 {
+            key.push_hex("Key_2", lo, 8);
+        }
+        Some(key)
+    }
 }
 
 impl Default for MercedesV0Decoder {

@@ -431,13 +431,73 @@ impl ProtocolDecoder for FaacSlhDecoder {
         None
     }
 
-    fn supports_encoding(&self) -> bool { false }
+    fn supports_encoding(&self) -> bool {
+        true
+    }
 
-    fn encode(&self, decoded: &DecodedSignal, button: u8) -> Option<Vec<LevelDuration>> { None }
+    fn encode(&self, decoded: &DecodedSignal, button: u8) -> Option<Vec<LevelDuration>> {
+        if decoded.data_count_bit != MIN_COUNT_BIT {
+            return None;
+        }
+        let data = gen_data(decoded, button);
+        let mut out = Vec::with_capacity(TX_REPEAT * 130);
+        for _ in 0..TX_REPEAT {
+            upload_once(data, &mut out);
+        }
+        Some(out)
+    }
 
-    fn from_flipper_key(&self, key: &FlipperKey) -> Option<DecodedSignal> { None }
+    fn from_flipper_key(&self, key: &FlipperKey) -> Option<DecodedSignal> {
+        // `subghz_protocol_decoder_faac_slh_deserialize`: Bit must be 64, Seed is required.
+        if key.bits != MIN_COUNT_BIT {
+            return None;
+        }
+        let data = key8(key)?;
+        let seed = read_hex(key, "Seed", 4)?;
+        let seed = u32::from_be_bytes([seed[0], seed[1], seed[2], seed[3]]);
+        let allow = key
+            .field("AllowZeroSeed")
+            .is_some_and(|v| !v.trim().is_empty());
+        let extra = u64::from(seed) | if allow { ALLOW_ZERO_SEED } else { 0 };
+        let d = signal(data, Some(extra));
+        if !is_prog(data) {
+            return Some(d);
+        }
+        // doctor-firmware's generic block also reads `Serial`/`Btn` (its decoder writes the
+        // remote decoded before the programming frame there); with them the encoder sends that
+        // remote's frames under the learnt seed instead of repeating the programming frame.
+        let serial = key.u32_field("Serial").unwrap_or(0);
+        let btn = key.u32_field("Btn").unwrap_or(0) as u8;
+        if serial == 0 && btn == 0 {
+            return Some(d);
+        }
+        let seed_known = known_seed(d.extra).is_some();
+        Some(DecodedSignal {
+            serial: Some(serial),
+            button: Some(btn),
+            encoder_capable: seed_known,
+            ..d
+        })
+    }
 
-    fn to_flipper_key(&self, decoded: &DecodedSignal) -> Option<FlipperKey> { None }
+    fn to_flipper_key(&self, decoded: &DecodedSignal) -> Option<FlipperKey> {
+        if decoded.data_count_bit != MIN_COUNT_BIT {
+            return None;
+        }
+        let mut k = FlipperKey::new(NAME, MIN_COUNT_BIT, decoded.data, 0, "");
+        if is_prog(decoded.data) && (decoded.serial.is_some() || decoded.button.is_some()) {
+            // doctor-firmware's generic lines (they come before `Seed`).
+            k.push("Serial", decoded.serial.unwrap_or(0).to_string());
+            k.push("Btn", decoded.button.unwrap_or(0).to_string());
+            k.push("Cnt", decoded.counter.unwrap_or(0).to_string());
+        }
+        let extra = decoded.extra.unwrap_or(0);
+        k.push_hex("Seed", extra & 0xFFFF_FFFF, 4);
+        if extra & ALLOW_ZERO_SEED != 0 {
+            k.push("AllowZeroSeed", "true");
+        }
+        Some(k)
+    }
 }
 
 /// A key file for a random frame (oracle driver fixtures). `r % 5`: 0-1 normal frame with its

@@ -479,15 +479,48 @@ impl ProtocolDecoder for MazdaSiemensDecoder {
         None
     }
 
-    fn supports_encoding(&self) -> bool { false }
+    fn supports_encoding(&self) -> bool {
+        true
+    }
 
-    fn encode(&self, decoded: &DecodedSignal, button: u8) -> Option<Vec<LevelDuration>> { None }
+    fn encode(&self, decoded: &DecodedSignal, button: u8) -> Option<Vec<LevelDuration>> {
+        // subghz_block_generic_deserialize_check_count_bit: the Key must be a 64-bit frame.
+        if decoded.data_count_bit != MIN_COUNT_BIT {
+            return None;
+        }
+        // mazda_parse_data(Key), then the Serial/Btn/Cnt fields override it (C deserialize).
+        let (key_serial, key_button, key_counter) = Self::parse_fields(decoded.data);
+        let serial = decoded.serial.unwrap_or(key_serial);
+        let captured_button = decoded.button.unwrap_or(key_button);
+        // Fresh press without an explicit Cnt: cnt + rolling multiplier (1), 16-bit.
+        let counter = decoded.counter.unwrap_or(key_counter).wrapping_add(1);
+
+        // The button goes into byte 4 (`data >> 24`); bytes 0-3 stay the serial.
+        let clear =
+            Self::build_cleartext(serial, Self::map_button(button, captured_button), counter);
+        Some(Self::build_upload(&clear))
+    }
 
     /// `subghz_protocol_decoder_mazda_siemens_deserialize`: a 64-bit cleartext key.
-    fn from_flipper_key(&self, key: &FlipperKey) -> Option<DecodedSignal> { None }
+    fn from_flipper_key(&self, key: &FlipperKey) -> Option<DecodedSignal> {
+        if key.bits != MIN_COUNT_BIT {
+            return None;
+        }
+        Some(Self::signal_from_packed(key.key_u64()?))
+    }
 
     /// `subghz_protocol_decoder_mazda_siemens_serialize`: Key, then Serial, Btn, Cnt.
-    fn to_flipper_key(&self, decoded: &DecodedSignal) -> Option<FlipperKey> { None }
+    fn to_flipper_key(&self, decoded: &DecodedSignal) -> Option<FlipperKey> {
+        if decoded.data_count_bit != MIN_COUNT_BIT {
+            return None;
+        }
+        let (serial, button, counter) = Self::parse_fields(decoded.data);
+        let mut key = FlipperKey::for_protocol("MazdaSiemens", MIN_COUNT_BIT, decoded.data);
+        key.push_u32("Serial", serial);
+        key.push_u32("Btn", button.into());
+        key.push_u32("Cnt", counter.into());
+        Some(key)
+    }
 }
 
 impl Default for MazdaSiemensDecoder {

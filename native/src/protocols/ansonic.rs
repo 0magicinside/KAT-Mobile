@@ -182,14 +182,30 @@ impl ProtocolDecoder for AnsonicDecoder {
         None
     }
 
-    fn supports_encoding(&self) -> bool { false }
+    fn supports_encoding(&self) -> bool {
+        true
+    }
 
     /// 3 copies; a 2-bit `button` replaces bits 1..2 (ARF's D-pad).
-    fn encode(&self, decoded: &DecodedSignal, button: u8) -> Option<Vec<LevelDuration>> { None }
+    fn encode(&self, decoded: &DecodedSignal, button: u8) -> Option<Vec<LevelDuration>> {
+        if decoded.data_count_bit != MIN_COUNT_BIT {
+            return None;
+        }
+        let mut data = decoded.data;
+        if button <= 0x3 {
+            data = (data & !(0x3 << BUTTON_SHIFT)) | (u64::from(button) << BUTTON_SHIFT);
+        }
+        Some(repeated(&upload(data), REPEAT))
+    }
 
-    fn from_flipper_key(&self, key: &FlipperKey) -> Option<DecodedSignal> { None }
+    fn from_flipper_key(&self, key: &FlipperKey) -> Option<DecodedSignal> {
+        let (data, bits) = key_data(key, |bits| bits == MIN_COUNT_BIT)?;
+        Some(frame(data, bits))
+    }
 
-    fn to_flipper_key(&self, decoded: &DecodedSignal) -> Option<FlipperKey> { None }
+    fn to_flipper_key(&self, decoded: &DecodedSignal) -> Option<FlipperKey> {
+        Some(key_file(NAME, decoded))
+    }
 }
 
 #[cfg(test)]

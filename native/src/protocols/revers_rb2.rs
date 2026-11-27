@@ -331,13 +331,32 @@ impl ProtocolDecoder for ReversRb2Decoder {
         self.c_feed(level, duration).or(stream)
     }
 
-    fn supports_encoding(&self) -> bool { false }
+    fn supports_encoding(&self) -> bool {
+        true
+    }
 
-    fn encode(&self, decoded: &DecodedSignal, _button: u8) -> Option<Vec<LevelDuration>> { None }
+    fn encode(&self, decoded: &DecodedSignal, _button: u8) -> Option<Vec<LevelDuration>> {
+        if decoded.data_count_bit != BIT_COUNT {
+            return None;
+        }
+        Some(repeat_upload(&upload(decoded.data), REPEAT))
+    }
 
-    fn from_flipper_key(&self, key: &FlipperKey) -> Option<DecodedSignal> { None }
+    fn from_flipper_key(&self, key: &FlipperKey) -> Option<DecodedSignal> {
+        (key.bits == BIT_COUNT).then(|| signal(key.key))
+    }
 
-    fn to_flipper_key(&self, decoded: &DecodedSignal) -> Option<FlipperKey> { None }
+    fn to_flipper_key(&self, decoded: &DecodedSignal) -> Option<FlipperKey> {
+        (decoded.data_count_bit == BIT_COUNT).then(|| {
+            FlipperKey::new(
+                "Revers_RB2",
+                BIT_COUNT,
+                decoded.data,
+                433_920_000,
+                "FuriHalSubGhzPresetOok650Async",
+            )
+        })
+    }
 }
 
 #[cfg(test)]

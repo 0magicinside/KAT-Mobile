@@ -451,15 +451,51 @@ impl ProtocolDecoder for AlutechAt4nDecoder {
         None
     }
 
-    fn supports_encoding(&self) -> bool { false }
+    fn supports_encoding(&self) -> bool {
+        self.table.is_some()
+    }
 
-    fn encode(&self, decoded: &DecodedSignal, button: u8) -> Option<Vec<LevelDuration>> { None }
+    fn encode(&self, decoded: &DecodedSignal, button: u8) -> Option<Vec<LevelDuration>> {
+        let table = self.table.as_ref()?;
+        if decoded.data_count_bit != MIN_COUNT_BIT as usize {
+            return None;
+        }
+        let (serial, counter, captured) = fields(decoded.data, table)?;
+        let mode = (decoded.extra.unwrap_or(0) >> 8) as u8;
+        let btn = if BUTTONS.contains(&button) { button } else { captured };
+        let (data, crc) = build_frame(serial, next_counter(mode, counter), btn, table);
+        Some(build_upload(data, crc).repeat(REPEAT))
+    }
 
     /// The decoder's deserialize (`Bit` 72, `CRC` required, `CounterMode`) + `get_string`.
-    fn from_flipper_key(&self, key: &FlipperKey) -> Option<DecodedSignal> { None }
+    fn from_flipper_key(&self, key: &FlipperKey) -> Option<DecodedSignal> {
+        if key.bits != MIN_COUNT_BIT as usize {
+            return None;
+        }
+        let crc = key.u32_field("CRC")?;
+        Some(self.signal(key.key, crc as u8, g6_common::counter_mode(key)))
+    }
 
     /// The serialize: `Protocol`, `Bit`, `Key`, `CRC` (decimal), then the key's `CounterMode`.
-    fn to_flipper_key(&self, decoded: &DecodedSignal) -> Option<FlipperKey> { None }
+    fn to_flipper_key(&self, decoded: &DecodedSignal) -> Option<FlipperKey> {
+        if decoded.data_count_bit != MIN_COUNT_BIT as usize {
+            return None;
+        }
+        let extra = decoded.extra?;
+        let mut key = FlipperKey::new(
+            "Alutech AT-4N",
+            MIN_COUNT_BIT as usize,
+            decoded.data,
+            433_920_000,
+            "FuriHalSubGhzPresetOok650Async",
+        );
+        key.push("CRC", (extra & 0xFF).to_string());
+        let mode = (extra >> 8) as u8;
+        if mode != 0 {
+            key.push("CounterMode", mode.to_string());
+        }
+        Some(key)
+    }
 }
 
 #[cfg(test)]

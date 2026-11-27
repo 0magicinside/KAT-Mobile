@@ -389,15 +389,90 @@ impl ProtocolDecoder for FordV2Decoder {
         None
     }
 
-    fn supports_encoding(&self) -> bool { false }
+    fn supports_encoding(&self) -> bool {
+        true
+    }
 
-    fn encode(&self, decoded: &DecodedSignal, button: u8) -> Option<Vec<LevelDuration>> { None }
+    fn encode(&self, decoded: &DecodedSignal, button: u8) -> Option<Vec<LevelDuration>> {
+        // ford_v2_encoder_rebuild_raw_from_payload: bytes 0..8 from Key, 8..13 from TailRaw.
+        let mut raw = [0u8; DATA_BYTES];
+        raw[..8].copy_from_slice(&decoded.data.to_be_bytes());
+        let extra = decoded.extra.unwrap_or(0);
+        raw[8..].copy_from_slice(&extra.to_be_bytes()[3..]);
+
+        // ARF overrides: Serial, then Cnt + 1 re-packed (raw[7] bit 7 and raw[9] bits 6..0 kept).
+        if let Some(serial) = decoded.serial {
+            raw[2..6].copy_from_slice(&serial.to_be_bytes());
+        }
+        if let Some(cnt) = decoded.counter {
+            let cnt = cnt.wrapping_add(1);
+            raw[7] = (raw[7] & 0x80) | ((cnt >> 9) & 0x7F) as u8;
+            raw[8] = (cnt >> 1) as u8;
+            raw[9] = (raw[9] & 0x7F) | (((cnt & 1) as u8) << 7);
+        }
+        // Button (captured = the Btn field, else the packed byte) with the parity bit re-patched.
+        raw[6] = Self::map_button(button, decoded.button.unwrap_or(raw[6]));
+        raw[7] = (raw[7] & 0x7F) | (Self::parity8(raw[6]) << 7);
+        if !Self::button_is_valid(raw[6]) {
+            return None;
+        }
+
+        let mut signal = Vec::with_capacity(ENC_BURST_COUNT * (ENC_PREAMBLE_PAIRS * 2 + DATA_BITS * 2 + 4));
+        for burst in 0..ENC_BURST_COUNT {
+            // Preamble: 70 pairs of (low short, high short)
+            for _ in 0..ENC_PREAMBLE_PAIRS {
+                Self::enc_add_level(&mut signal, false, ENC_TE_SHORT);
+                Self::enc_add_level(&mut signal, true, ENC_TE_SHORT);
+            }
+            // Sync low + high short
+            Self::enc_add_level(&mut signal, false, ENC_SYNC_LO_US);
+            Self::enc_add_level(&mut signal, true, ENC_TE_SHORT);
+            // Data bits 1..103 (bit 0 implied by the high short above)
+            for bit_pos in 1..DATA_BITS {
+                let byte_idx = bit_pos / 8;
+                let bit_idx = 7 - (bit_pos % 8);
+                let bit = (raw[byte_idx] >> bit_idx) & 1 != 0;
+                Self::enc_manchester_bit(&mut signal, bit);
+            }
+            if burst + 1 < ENC_BURST_COUNT {
+                Self::enc_add_level(&mut signal, true, ENC_INTER_BURST_GAP_US);
+            }
+        }
+        Some(signal)
+    }
 
     /// `subghz_protocol_decoder_ford_v2_deserialize` (see the module doc, "Key files").
-    fn from_flipper_key(&self, key: &FlipperKey) -> Option<DecodedSignal> { None }
+    fn from_flipper_key(&self, key: &FlipperKey) -> Option<DecodedSignal> {
+        if key.bits != DATA_BITS {
+            return None;
+        }
+        let mut raw = [0u8; DATA_BYTES];
+        raw[..8].copy_from_slice(&key.key_u64()?.to_be_bytes());
+        if let Some(tail) = key.hex_bytes_field("TailRaw").filter(|t| t.len() == TAIL_RAW_BYTES) {
+            raw[8..].copy_from_slice(&tail);
+        }
+        Self::frame_signal(&raw)
+    }
 
     /// `subghz_protocol_decoder_ford_v2_serialize` (see the module doc, "Key files").
-    fn to_flipper_key(&self, decoded: &DecodedSignal) -> Option<FlipperKey> { None }
+    fn to_flipper_key(&self, decoded: &DecodedSignal) -> Option<FlipperKey> {
+        let extra = decoded.extra.unwrap_or(0);
+        if decoded.data_count_bit != DATA_BITS || extra >> (TAIL_RAW_BYTES * 8) != 0 {
+            return None;
+        }
+        let mut raw = [0u8; DATA_BYTES];
+        raw[..8].copy_from_slice(&decoded.data.to_be_bytes());
+        raw[8..].copy_from_slice(&extra.to_be_bytes()[3..]);
+        let d = Self::frame_signal(&raw)?;
+        let tail31 = u32::from_be_bytes([raw[9] & 0x7F, raw[10], raw[11], raw[12]]);
+        let mut key = FlipperKey::for_protocol("Ford V2", DATA_BITS, decoded.data);
+        key.push_u32("Serial", d.serial?);
+        key.push_u32("Btn", raw[6].into());
+        key.push_u32("Cnt", d.counter?.into());
+        key.push_u32("Tail31", tail31);
+        key.push_hex_bytes("TailRaw", &raw[8..]);
+        Some(key)
+    }
 }
 
 impl Default for FordV2Decoder {

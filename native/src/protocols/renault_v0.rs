@@ -569,15 +569,66 @@ impl ProtocolDecoder for RenaultV0Decoder {
         None
     }
 
-    fn supports_encoding(&self) -> bool { false }
+    fn supports_encoding(&self) -> bool {
+        true
+    }
 
-    fn encode(&self, decoded: &DecodedSignal, button: u8) -> Option<Vec<LevelDuration>> { None }
+    fn encode(&self, decoded: &DecodedSignal, button: u8) -> Option<Vec<LevelDuration>> {
+        let mut data = decoded.data;
+        let mut key2 = (decoded.extra? & KEY2_MASK) as u32;
+        // The C encoder refuses frames that fail the type-13 gate.
+        if !Self::type13_valid(data, key2) {
+            return None;
+        }
+
+        if Self::model_matches(data, key2) {
+            // Rolling frame: re-mint with the requested button and the next counter.
+            let (serial, captured_button, counter) = Self::parse_fields(data);
+            let new_button = Self::map_button(button, captured_button);
+            let (new_data, new_key2) = Self::build_key(serial, new_button, counter.wrapping_add(1));
+            if !Self::type13_valid(new_data, new_key2) {
+                return None;
+            }
+            data = new_data;
+            key2 = new_key2;
+        }
+        // Non-model frames are replayed verbatim (the C ignores Btn/Cnt for them).
+
+        Some(Self::build_upload(data, key2))
+    }
 
     /// `subghz_protocol_decoder_renault_v0_deserialize` (see the module doc, Key files).
-    fn from_flipper_key(&self, key: &FlipperKey) -> Option<DecodedSignal> { None }
+    fn from_flipper_key(&self, key: &FlipperKey) -> Option<DecodedSignal> {
+        if key.bits != FRAME_BITS {
+            return None;
+        }
+        let data = key.key_u64()?;
+        let key2 = (u64::from(key.u32_field("Key2")?) & KEY2_MASK) as u32;
+        Self::type13_valid(data, key2).then(|| Self::build_signal(data, key2))
+    }
 
     /// `subghz_protocol_decoder_renault_v0_serialize` (see the module doc, Key files).
-    fn to_flipper_key(&self, decoded: &DecodedSignal) -> Option<FlipperKey> { None }
+    fn to_flipper_key(&self, decoded: &DecodedSignal) -> Option<FlipperKey> {
+        let data = decoded.data;
+        let key2 = (decoded.extra? & KEY2_MASK) as u32;
+        if decoded.data_count_bit != FRAME_BITS || !Self::type13_valid(data, key2) {
+            return None;
+        }
+        let (serial, button, counter) = Self::parse_fields(data);
+        let mut key = FlipperKey::for_protocol("Renault V0", FRAME_BITS, data);
+        key.push_u32("Serial", serial);
+        key.push_u32("Btn", button.into());
+        key.push_u32("Cnt", counter.into());
+        key.push_u32("Key2", key2);
+        let name = match button {
+            BTN_TRUNK => "Trunk",
+            BTN_LOCK => "Lock",
+            BTN_UNLOCK => "Unlock",
+            _ => "?",
+        };
+        key.push("Disp", format!("Renault V0 - {name}"));
+        Some(key)
+    }
 }
 
 impl Default for RenaultV0Decoder {

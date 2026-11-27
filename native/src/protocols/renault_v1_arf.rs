@@ -629,17 +629,88 @@ impl ProtocolDecoder for RenaultV1ArfDecoder {
         None
     }
 
-    fn supports_encoding(&self) -> bool { false }
+    fn supports_encoding(&self) -> bool {
+        true
+    }
 
     /// Replay (`subghz_protocol_encoder_renault_v1_deserialize` without a seed): the requested
     /// button is ignored, as ARF disables the D-pad for these frames.
-    fn encode(&self, decoded: &DecodedSignal, _button: u8) -> Option<Vec<LevelDuration>> { None }
+    fn encode(&self, decoded: &DecodedSignal, _button: u8) -> Option<Vec<LevelDuration>> {
+        if decoded.data_count_bit != FRAME_BITS {
+            return None;
+        }
+        let extra = decoded.extra?;
+        let key2 = (extra as u32) & KEY2_MASK;
+        let stored_preamble = ((extra >> EXTRA_PREAMBLE_SHIFT) & 0xFF) as u8;
+        let attempt = Self::classify_frame(decoded.data, key2)?;
+        let preamble_bits = if Self::preamble_bits_valid(stored_preamble as usize) {
+            stored_preamble
+        } else {
+            Self::default_preamble_bits(attempt.frame_type)
+        };
+        let upload = Self::build_upload(decoded.data, key2, preamble_bits)?;
+        let mut signal = Vec::with_capacity(upload.len() * TX_REPEAT);
+        for _ in 0..TX_REPEAT {
+            signal.extend(
+                upload
+                    .iter()
+                    .map(|ld| LevelDuration::new(ld.level, ld.duration_us)),
+            );
+        }
+        Some(signal)
+    }
 
     /// `subghz_protocol_decoder_renault_v1_deserialize` (see the module doc, "Key files").
-    fn from_flipper_key(&self, key: &FlipperKey) -> Option<DecodedSignal> { None }
+    fn from_flipper_key(&self, key: &FlipperKey) -> Option<DecodedSignal> {
+        if key.bits != FRAME_BITS {
+            return None;
+        }
+        let data = key.key_u64()?;
+        let key2 = key.u32_field("Key2")? & KEY2_MASK;
+        let stored_preamble = key
+            .u32_field("Preamble")
+            .filter(|&p| Self::preamble_bits_valid(p as usize))
+            .unwrap_or(0) as u8;
+        match Self::classify_frame(data, key2) {
+            Some(mut attempt) => {
+                attempt.preamble_bits = if stored_preamble != 0 {
+                    stored_preamble
+                } else {
+                    Self::default_preamble_bits(attempt.frame_type)
+                };
+                Some(Self::decoded_signal(&attempt))
+            }
+            // ARF: type Unknown, both checks failed; it still loads (replay refuses it).
+            None => Some(DecodedSignal {
+                serial: Some((data >> 40) as u32),
+                button: Some((data >> 32) as u8),
+                counter: Some(((data >> 24) & 0xFF) as u16),
+                crc_valid: false,
+                data,
+                data_count_bit: FRAME_BITS,
+                encoder_capable: false,
+                extra: Some(key2 as u64 | (stored_preamble as u64) << EXTRA_PREAMBLE_SHIFT),
+                protocol_display_name: None,
+            }),
+        }
+    }
 
     /// `subghz_protocol_decoder_renault_v1_serialize` (ARF; see the module doc, "Key files").
-    fn to_flipper_key(&self, decoded: &DecodedSignal) -> Option<FlipperKey> { None }
+    fn to_flipper_key(&self, decoded: &DecodedSignal) -> Option<FlipperKey> {
+        if decoded.data_count_bit != FRAME_BITS {
+            return None;
+        }
+        let extra = decoded.extra?;
+        let data = decoded.data;
+        let mut key = FlipperKey::for_protocol("Renault V1", FRAME_BITS, data);
+        key.push_u32("Key2", (extra as u32) & KEY2_MASK);
+        key.push_u32("Preamble", ((extra >> EXTRA_PREAMBLE_SHIFT) & 0xFF) as u32);
+        key.push_u32("Serial", (data >> 40) as u32);
+        key.push_u32("Btn", ((data >> 32) & 0xFF) as u32);
+        key.push_u32("Cnt", ((data >> 24) & 0xFF) as u32);
+        key.push_hex_bytes("Recovered", &[0]);
+        Some(key)
+    }
 }
 
 impl Default for RenaultV1ArfDecoder {

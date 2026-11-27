@@ -253,13 +253,23 @@ impl ProtocolDecoder for IntertechnoV3Decoder {
         None
     }
 
-    fn supports_encoding(&self) -> bool { false }
+    fn supports_encoding(&self) -> bool {
+        true
+    }
 
-    fn encode(&self, decoded: &DecodedSignal, _button: u8) -> Option<Vec<LevelDuration>> { None }
+    fn encode(&self, decoded: &DecodedSignal, _button: u8) -> Option<Vec<LevelDuration>> {
+        let bits = decoded.data_count_bit;
+        (bits == MIN_COUNT_BIT || bits == DIMMING_COUNT_BIT).then(|| with_repeats(&build_frame(decoded.data, bits), TX_REPEAT))
+    }
 
-    fn from_flipper_key(&self, key: &FlipperKey) -> Option<DecodedSignal> { None }
+    fn from_flipper_key(&self, key: &FlipperKey) -> Option<DecodedSignal> {
+        (key.bits == MIN_COUNT_BIT || key.bits == DIMMING_COUNT_BIT).then(|| decoded(key.key, key.bits))
+    }
 
-    fn to_flipper_key(&self, d: &DecodedSignal) -> Option<FlipperKey> { None }
+    fn to_flipper_key(&self, d: &DecodedSignal) -> Option<FlipperKey> {
+        let bits = d.data_count_bit;
+        (bits == MIN_COUNT_BIT || bits == DIMMING_COUNT_BIT).then(|| FlipperKey::for_protocol(NAME, bits, d.data))
+    }
 }
 
 #[cfg(test)]

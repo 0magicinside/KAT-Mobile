@@ -391,9 +391,32 @@ impl ProtocolDecoder for HyundaiDecoder {
         }
     }
 
-    fn supports_encoding(&self) -> bool { false }
+    fn supports_encoding(&self) -> bool {
+        true
+    }
 
-    fn encode(&self, decoded: &DecodedSignal, button: u8) -> Option<Vec<LevelDuration>> { None }
+    fn encode(&self, decoded: &DecodedSignal, button: u8) -> Option<Vec<LevelDuration>> {
+        let b8 = decoded.extra?;
+        let mut raw = [0u8; WIRE_BYTES];
+        raw[..8].copy_from_slice(&decoded.data.to_be_bytes());
+        raw[8] = (b8 & 0xFF) as u8;
+        if !frame_valid(&raw) {
+            return None;
+        }
+
+        let original = raw[5] & 0x0F;
+        let new_btn = Self::map_button(button).unwrap_or(original);
+        if new_btn != original {
+            raw[5] = (raw[5] & 0xF0) | new_btn;
+            advance_counter(&mut raw);
+        }
+
+        let mut signal = Vec::with_capacity(2 * (3 + (PREAMBLE_BYTES + WIRE_BYTES) * 16) + 1);
+        Self::enc_frame(&mut signal, &raw, true);
+        Self::enc_frame(&mut signal, &raw, false);
+        Self::enc_add_level(&mut signal, false, IFG_LOW);
+        Some(signal)
+    }
 }
 
 impl Default for HyundaiDecoder {

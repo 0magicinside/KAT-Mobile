@@ -328,19 +328,45 @@ impl ProtocolDecoder for SubaruV1Decoder {
         None
     }
 
-    fn supports_encoding(&self) -> bool { false }
+    fn supports_encoding(&self) -> bool {
+        true
+    }
 
-    fn encode(&self, decoded: &DecodedSignal, button: u8) -> Option<Vec<LevelDuration>> { None }
+    fn encode(&self, decoded: &DecodedSignal, button: u8) -> Option<Vec<LevelDuration>> {
+        Some(Self::upload(Self::next_data(decoded, button)?))
+    }
 
     /// The frame `encode` sends, so the app keeps the counter advanced on the capture.
-    fn sent_signal(&self, decoded: &DecodedSignal, button: u8) -> Option<DecodedSignal> { None }
+    fn sent_signal(&self, decoded: &DecodedSignal, button: u8) -> Option<DecodedSignal> {
+        Some(Self::frame(Self::next_data(decoded, button)?))
+    }
 
     /// Key file: `Protocol: Subaru V1`, `Bit: 56`, the 7 bytes as `Key`, then decimal `Serial`,
     /// `Btn` (native nibble) and `Cnt` (20 bits). KAT's own format: no Flipper firmware has one.
-    fn to_flipper_key(&self, decoded: &DecodedSignal) -> Option<FlipperKey> { None }
+    fn to_flipper_key(&self, decoded: &DecodedSignal) -> Option<FlipperKey> {
+        if decoded.data_count_bit != MIN_COUNT_BIT {
+            return None;
+        }
+        let f = fields(decoded.data);
+        let mut key = FlipperKey::for_protocol("Subaru V1", MIN_COUNT_BIT, decoded.data);
+        key.push_u32("Serial", f.serial);
+        key.push_u32("Btn", f.btn.into());
+        key.push_u32("Cnt", f.cnt);
+        Some(key)
+    }
 
     /// Everything comes from the Key; a key whose check byte fails does not load.
-    fn from_flipper_key(&self, key: &FlipperKey) -> Option<DecodedSignal> { None }
+    fn from_flipper_key(&self, key: &FlipperKey) -> Option<DecodedSignal> {
+        if key.bits != MIN_COUNT_BIT {
+            return None;
+        }
+        let data = key.key_u64()?;
+        if data >> 56 != 0 {
+            return None;
+        }
+        let d = Self::frame(data);
+        d.crc_valid.then_some(d)
+    }
 }
 
 impl Default for SubaruV1Decoder {

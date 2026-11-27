@@ -514,17 +514,35 @@ impl ProtocolDecoder for ToyotaFoxfwDecoder {
         out
     }
 
-    fn supports_encoding(&self) -> bool { false }
+    fn supports_encoding(&self) -> bool {
+        false
+    }
 
     /// FoxFW's encoder is an SD-card plugin outside this port.
-    fn encode(&self, _decoded: &DecodedSignal, _button: u8) -> Option<Vec<LevelDuration>> { None }
+    fn encode(&self, _decoded: &DecodedSignal, _button: u8) -> Option<Vec<LevelDuration>> {
+        None
+    }
 
     /// `subghz_protocol_decoder_toyota_deserialize`: `Bit` >= 66, the 8-byte `Key`, optional `Tail`
     /// (see the module doc for the variant).
-    fn from_flipper_key(&self, key: &FlipperKey) -> Option<DecodedSignal> { None }
+    fn from_flipper_key(&self, key: &FlipperKey) -> Option<DecodedSignal> {
+        if key.bits < usize::from(C_BITS) {
+            return None;
+        }
+        let data = key.key_u64()?;
+        let tail = key.u32_field("Tail").unwrap_or(0);
+        Some(decoded(data, key.bits, tail, variant_of((data & 0x0F) as u8)))
+    }
 
     /// `subghz_protocol_decoder_toyota_serialize`: the generic `Protocol` / `Bit` / `Key`, then `Tail`.
-    fn to_flipper_key(&self, decoded: &DecodedSignal) -> Option<FlipperKey> { None }
+    fn to_flipper_key(&self, decoded: &DecodedSignal) -> Option<FlipperKey> {
+        if decoded.data_count_bit < usize::from(C_BITS) {
+            return None;
+        }
+        let mut key = FlipperKey::for_protocol(KEY_FILE_NAME, decoded.data_count_bit, decoded.data);
+        key.push_u32("Tail", decoded.extra.unwrap_or(0) as u32);
+        Some(key)
+    }
 }
 
 #[cfg(test)]

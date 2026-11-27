@@ -330,13 +330,42 @@ impl ProtocolDecoder for JaroliftDecoder {
         None
     }
 
-    fn supports_encoding(&self) -> bool { false }
+    fn supports_encoding(&self) -> bool {
+        true
+    }
 
-    fn encode(&self, decoded: &DecodedSignal, button: u8) -> Option<Vec<LevelDuration>> { None }
+    fn encode(&self, decoded: &DecodedSignal, button: u8) -> Option<Vec<LevelDuration>> {
+        if decoded.data_count_bit != MIN_COUNT_BIT {
+            return None;
+        }
+        let f = analyze(decoded.data, decoded.extra?)?;
+        let btn = if button <= 0x0F { button } else { f.btn };
+        let cnt = next_counter(u32::from(f.cnt), 0xFFFF) as u16;
+        let (data, data_2) = gen_data(f.serial, btn, cnt, f.group)?;
+        let mut out = Vec::with_capacity(TX_REPEAT * 165);
+        for _ in 0..TX_REPEAT {
+            upload_once(data, data_2, &mut out);
+        }
+        Some(out)
+    }
 
-    fn from_flipper_key(&self, key: &FlipperKey) -> Option<DecodedSignal> { None }
+    fn from_flipper_key(&self, key: &FlipperKey) -> Option<DecodedSignal> {
+        // `subghz_protocol_decoder_jarolift_deserialize`: Bit must be 72, Key + Data (8 bytes).
+        if key.bits != MIN_COUNT_BIT {
+            return None;
+        }
+        signal(key8(key)?, hex8_field(key, "Data")?)
+    }
 
-    fn to_flipper_key(&self, decoded: &DecodedSignal) -> Option<FlipperKey> { None }
+    fn to_flipper_key(&self, decoded: &DecodedSignal) -> Option<FlipperKey> {
+        if decoded.data_count_bit != MIN_COUNT_BIT {
+            return None;
+        }
+        // `..._serialize`: generic block + "Data" = the grouping bits.
+        let mut k = FlipperKey::new(NAME, MIN_COUNT_BIT, decoded.data, 0, "");
+        k.push_hex("Data", decoded.extra?, 8);
+        Some(k)
+    }
 }
 
 /// A key file for a random valid frame (oracle driver fixtures): random serial, button,

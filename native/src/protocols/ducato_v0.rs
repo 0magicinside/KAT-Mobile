@@ -263,15 +263,35 @@ impl ProtocolDecoder for DucatoV0Decoder {
         None
     }
 
-    fn supports_encoding(&self) -> bool { false }
+    fn supports_encoding(&self) -> bool {
+        false
+    }
 
-    fn encode(&self, _decoded: &DecodedSignal, _button: u8) -> Option<Vec<LevelDuration>> { None }
+    fn encode(&self, _decoded: &DecodedSignal, _button: u8) -> Option<Vec<LevelDuration>> {
+        None
+    }
 
     /// `subghz_protocol_decoder_ducato_v0_deserialize` (see "Key files").
-    fn from_flipper_key(&self, key: &FlipperKey) -> Option<DecodedSignal> { None }
+    fn from_flipper_key(&self, key: &FlipperKey) -> Option<DecodedSignal> {
+        if key.bits != DATA_BITS {
+            return None;
+        }
+        let crc = (key.u32_field("CRC").unwrap_or(0) & 0x7F) as u8;
+        Some(signal(key.key_u64()?, crc))
+    }
 
     /// `subghz_protocol_decoder_ducato_v0_serialize`.
-    fn to_flipper_key(&self, decoded: &DecodedSignal) -> Option<FlipperKey> { None }
+    fn to_flipper_key(&self, decoded: &DecodedSignal) -> Option<FlipperKey> {
+        if decoded.data_count_bit != DATA_BITS {
+            return None;
+        }
+        let mut key = FlipperKey::for_protocol("Fiat Ducato V0", DATA_BITS, decoded.data);
+        key.push_u32("Serial", decoded.serial?);
+        key.push_u32("Btn", decoded.button?.into());
+        key.push_u32("Hop", (decoded.data >> 32) as u32);
+        key.push_u32("CRC", decoded.extra? as u32);
+        Some(key)
+    }
 }
 
 #[cfg(test)]

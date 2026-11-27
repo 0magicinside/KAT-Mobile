@@ -409,9 +409,36 @@ impl ProtocolDecoder for AudiDecoder {
         }
     }
 
-    fn supports_encoding(&self) -> bool { false }
+    fn supports_encoding(&self) -> bool {
+        true
+    }
 
-    fn encode(&self, decoded: &DecodedSignal, button: u8) -> Option<Vec<LevelDuration>> { None }
+    fn encode(&self, decoded: &DecodedSignal, button: u8) -> Option<Vec<LevelDuration>> {
+        let mut raw = decoded.data.to_be_bytes();
+        if !frame_valid(&raw) {
+            return None;
+        }
+
+        let original_btn = raw[6];
+        let new_btn = Self::map_button(button).unwrap_or(original_btn);
+        if new_btn != original_btn {
+            // audi_reencode: advance the plaintext counter for a genuine (non-replay) press.
+            let base = decoded.counter.unwrap_or_else(|| plain_counter(&raw));
+            let new_cnt = base.wrapping_add(1);
+            let mut plain = raw;
+            decrypt_block(&mut plain);
+            plain[3..5].copy_from_slice(&new_cnt.to_be_bytes());
+            plain[6] = new_btn;
+            encrypt(&mut plain);
+            raw = plain;
+        }
+
+        let mut signal = Vec::with_capacity(REPEATS * (2 + WIRE_BITS * 2 + 1));
+        for _ in 0..REPEATS {
+            Self::enc_frame(&mut signal, &raw);
+        }
+        Some(signal)
+    }
 }
 
 impl Default for AudiDecoder {

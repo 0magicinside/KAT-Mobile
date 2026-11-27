@@ -579,16 +579,47 @@ impl ProtocolDecoder for SubaruDecoder {
         None
     }
 
-    fn supports_encoding(&self) -> bool { false }
+    fn supports_encoding(&self) -> bool {
+        true
+    }
 
-    fn encode(&self, decoded: &DecodedSignal, button: u8) -> Option<Vec<LevelDuration>> { None }
+    fn encode(&self, decoded: &DecodedSignal, button: u8) -> Option<Vec<LevelDuration>> {
+        if decoded.data_count_bit != MIN_COUNT_BIT as usize {
+            return None;
+        }
+        let key = decoded.data;
+        let from_key = Self::decode_fields(key);
+        let serial = decoded.serial.unwrap_or(from_key.serial) & 0xFF_FFFF;
+        let btn = Self::map_button(button, decoded.button.unwrap_or(from_key.btn)) & 0x0F;
+        // Next press: counter + 1 (ProtoPirate's emulate scene / ARF's rolling multiplier).
+        let cnt = decoded.counter.unwrap_or(from_key.cnt).wrapping_add(1);
+        Some(Self::build_upload(Self::build_key(key, serial, btn, cnt)))
+    }
 
     /// `subghz_protocol_decoder_subaru_deserialize`: exactly 64 bits; everything comes from the Key
     /// (see the module doc, "Key files").
-    fn from_flipper_key(&self, key: &FlipperKey) -> Option<DecodedSignal> { None }
+    fn from_flipper_key(&self, key: &FlipperKey) -> Option<DecodedSignal> {
+        if key.bits != MIN_COUNT_BIT as usize {
+            return None;
+        }
+        Some(Self::frame(key.key_u64()?))
+    }
 
     /// `subghz_protocol_decoder_subaru_serialize` (see the module doc, "Key files").
-    fn to_flipper_key(&self, decoded: &DecodedSignal) -> Option<FlipperKey> { None }
+    fn to_flipper_key(&self, decoded: &DecodedSignal) -> Option<FlipperKey> {
+        if decoded.data_count_bit != MIN_COUNT_BIT as usize {
+            return None;
+        }
+        let f = Self::decode_fields(decoded.data);
+        let mut key = FlipperKey::for_protocol("Subaru", MIN_COUNT_BIT as usize, decoded.data);
+        key.push_u32("Serial", f.serial);
+        key.push_u32("Btn", f.btn.into());
+        key.push_u32("Cnt", f.cnt.into());
+        // subaru_get_button_name: names[btn & 3].
+        let name = ["Lock", "Unlock", "Trunk", "Panic"][(f.btn & 0x03) as usize];
+        key.push("Disp", format!("Subaru - {name}"));
+        Some(key)
+    }
 }
 
 impl Default for SubaruDecoder {

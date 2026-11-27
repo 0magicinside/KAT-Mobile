@@ -210,13 +210,34 @@ impl ProtocolDecoder for CardinS508Decoder {
         bit.and_then(|b| self.add_bit(b))
     }
 
-    fn supports_encoding(&self) -> bool { false }
+    fn supports_encoding(&self) -> bool {
+        false
+    }
 
-    fn encode(&self, _decoded: &DecodedSignal, _button: u8) -> Option<Vec<LevelDuration>> { None }
+    fn encode(&self, _decoded: &DecodedSignal, _button: u8) -> Option<Vec<LevelDuration>> {
+        None
+    }
 
-    fn from_flipper_key(&self, key: &FlipperKey) -> Option<DecodedSignal> { None }
+    fn from_flipper_key(&self, key: &FlipperKey) -> Option<DecodedSignal> {
+        if key.bits != BIT_COUNT {
+            return None;
+        }
+        let data = key.hex_bytes_field("Data")?;
+        let hi = data
+            .get(..8)?
+            .iter()
+            .fold(0u64, |acc, &b| (acc << 8) | u64::from(b));
+        Some(signal(hi, key.key))
+    }
 
-    fn to_flipper_key(&self, decoded: &DecodedSignal) -> Option<FlipperKey> { None }
+    fn to_flipper_key(&self, decoded: &DecodedSignal) -> Option<FlipperKey> {
+        if decoded.data_count_bit != BIT_COUNT {
+            return None;
+        }
+        let mut key = FlipperKey::for_protocol(NAME, BIT_COUNT, decoded.extra?);
+        key.push_hex("Data", decoded.data, 8);
+        Some(key)
+    }
 }
 
 /// Synthetic captures for the tests and the fuzz tool.

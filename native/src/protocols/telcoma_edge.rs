@@ -196,13 +196,34 @@ impl ProtocolDecoder for TelcomaEdgeDecoder {
         found
     }
 
-    fn supports_encoding(&self) -> bool { false }
+    fn supports_encoding(&self) -> bool {
+        true
+    }
 
-    fn encode(&self, decoded: &DecodedSignal, _button: u8) -> Option<Vec<LevelDuration>> { None }
+    fn encode(&self, decoded: &DecodedSignal, _button: u8) -> Option<Vec<LevelDuration>> {
+        (decoded.data_count_bit == BIT_COUNT)
+            .then(|| repeat_upload(&upload(decoded.data as u32), REPEAT))
+    }
 
-    fn from_flipper_key(&self, key: &FlipperKey) -> Option<DecodedSignal> { None }
+    fn from_flipper_key(&self, key: &FlipperKey) -> Option<DecodedSignal> {
+        // The decoder side keeps the full 64-bit Key; only the low 32 bits are the frame.
+        (key.bits == BIT_COUNT).then(|| DecodedSignal {
+            data: key.key,
+            ..signal(key.key as u32)
+        })
+    }
 
-    fn to_flipper_key(&self, decoded: &DecodedSignal) -> Option<FlipperKey> { None }
+    fn to_flipper_key(&self, decoded: &DecodedSignal) -> Option<FlipperKey> {
+        (decoded.data_count_bit == BIT_COUNT).then(|| {
+            FlipperKey::new(
+                "Telcoma/Cardin EDGE",
+                BIT_COUNT,
+                decoded.data,
+                433_920_000,
+                "FuriHalSubGhzPresetOok650Async",
+            )
+        })
+    }
 }
 
 #[cfg(test)]

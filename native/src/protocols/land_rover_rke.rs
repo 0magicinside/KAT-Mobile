@@ -375,9 +375,48 @@ impl ProtocolDecoder for LandRoverRkeDecoder {
         None
     }
 
-    fn supports_encoding(&self) -> bool { false }
+    fn supports_encoding(&self) -> bool {
+        true
+    }
 
-    fn encode(&self, decoded: &DecodedSignal, button: u8) -> Option<Vec<LevelDuration>> { None }
+    fn encode(&self, decoded: &DecodedSignal, button: u8) -> Option<Vec<LevelDuration>> {
+        let serial = decoded.serial?;
+        // Reconstruct the original frame to preserve the hop code, func bits, and status, then
+        // override only the button. The hop code lives in (data, extra); recover it.
+        let extra = decoded.extra.unwrap_or(0);
+        let orig_frame = Self::data_to_frame(decoded.data, extra);
+        let (hop_code, _serial, _orig_button, func_bits, status) = Self::unpack_frame(&orig_frame);
+
+        let btn = Self::map_button(button);
+        let frame = Self::pack_frame(hop_code, serial, btn, func_bits, status);
+
+        let mut signal = Vec::with_capacity(
+            ((PREAMBLE_COUNT as usize + 1 + FRAME_BITS) * 2 + 1) * REPEAT_COUNT as usize,
+        );
+
+        for rep in 0..REPEAT_COUNT {
+            // Preamble: 20 pairs.
+            for _ in 0..PREAMBLE_COUNT {
+                Self::push_pair(&mut signal, PREAMBLE_HIGH_US, PREAMBLE_LOW_US);
+            }
+            // Sync.
+            Self::push_pair(&mut signal, SYNC_HIGH_US, SYNC_LOW_US);
+            // Data bits, MSB-first (frame bit 65 first on air).
+            for b in (0..FRAME_BITS).rev() {
+                if frame[b] != 0 {
+                    Self::push_pair(&mut signal, BIT1_HIGH_US, BIT1_LOW_US);
+                } else {
+                    Self::push_pair(&mut signal, BIT0_HIGH_US, BIT0_LOW_US);
+                }
+            }
+            // Inter-repetition gap.
+            if rep < REPEAT_COUNT - 1 {
+                signal.push(LevelDuration::new(false, REPEAT_GAP_US));
+            }
+        }
+
+        Some(signal)
+    }
 }
 
 impl Default for LandRoverRkeDecoder {

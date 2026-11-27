@@ -893,15 +893,116 @@ impl ProtocolDecoder for FiatV1Decoder {
         self.commit(raw, VARIANT_B).ok().flatten()
     }
 
-    fn supports_encoding(&self) -> bool { false }
+    fn supports_encoding(&self) -> bool {
+        true
+    }
 
-    fn encode(&self, decoded: &DecodedSignal, button: u8) -> Option<Vec<LevelDuration>> { None }
+    fn encode(&self, decoded: &DecodedSignal, button: u8) -> Option<Vec<LevelDuration>> {
+        let (raw, variant) = Self::raw_from_signal(decoded)?;
+        if !Self::frame_valid(&raw) {
+            return None;
+        }
+        let captured = Self::fields(&raw);
+        let uid = captured.uid;
+        let next_control = || decoded.counter.unwrap_or(captured.control).wrapping_add(1) & 0x03FF;
+        let tx_raw = if remote_tags::is_nissan(Some(uid)) {
+            // A tagged Nissan (Renault-Nissan Alliance) remote: sign with the no-epoch Renault
+            // schedule and the Nissan button map. Identical to the Fiat path below counter 1024.
+            match Self::resolve_nissan_key(&captured) {
+                Some(std_key) => {
+                    let tx_button = Self::map_nissan_button(button).unwrap_or(captured.button);
+                    let tx_control = next_control();
+                    let hop = hitag2::renault_authenticator(uid, tx_button, u32::from(tx_control), &std_key);
+                    Self::build_raw(uid, tx_button, tx_control, hop, captured.tail)
+                }
+                None => raw,
+            }
+        } else {
+            match Self::resolve_key(&captured) {
+                Some((key, epoch)) => {
+                    let tx_button = Self::map_button(button).unwrap_or(captured.button);
+                    let tx_control = next_control();
+                    let hop = hitag2::fiat_bcm_authenticator(uid, tx_button, tx_control, &key, epoch);
+                    Self::build_raw(uid, tx_button, tx_control, hop, captured.tail)
+                }
+                // ProtoPirate refuses here; ARF replays the captured frame (any button).
+                None => raw,
+            }
+        };
+
+        let mut signal = Vec::with_capacity(ENC_REPEAT * (2 * WIRE_BITS + 2));
+        for _ in 0..ENC_REPEAT {
+            Self::append_upload(&mut signal, &tx_raw, variant);
+        }
+        Some(signal)
+    }
 
     /// `subghz_protocol_decoder_fiat_v1_deserialize` (see the module doc, Key files).
-    fn from_flipper_key(&self, key: &FlipperKey) -> Option<DecodedSignal> { None }
+    fn from_flipper_key(&self, key: &FlipperKey) -> Option<DecodedSignal> {
+        if key.bits != LOGICAL_BITS {
+            return None;
+        }
+        let variant = if key.u32_field("Type") == Some(VARIANT_A.into()) {
+            VARIANT_A
+        } else {
+            VARIANT_B
+        };
+        let file_raw = key.hex_bytes_field("Raw").and_then(|b| <[u8; WIRE_BYTES]>::try_from(b).ok());
+        let raw = match file_raw {
+            Some(raw) => raw,
+            None => {
+                // fiat_v1_rebuild_raw from the Key and the field lines.
+                let data = key.key_u64()?;
+                let uid = key.u32_field("Serial").unwrap_or((data >> 32) as u32);
+                let hop = key.u32_field("Hop").unwrap_or(data as u32);
+                let button = key.u32_field("Btn").unwrap_or(0) as u8;
+                let control = (key.u32_field("Cnt").unwrap_or(0) & 0x03FF) as u16;
+                let tail = key.u32_field("Tail Bits").map_or(DEFAULT_TAIL_BITS, |t| (t & 0x03) as u8);
+                let mut raw = Self::build_raw(uid, button, control, hop, tail);
+                if let Some(xor) = key.u32_field("XOR").filter(|&x| x != 0) {
+                    raw[12] = xor as u8;
+                }
+                raw
+            }
+        };
+        if !Self::frame_valid(&raw) {
+            return None;
+        }
+        Self::adopt_file_key(key, &Self::fields(&raw));
+        Some(Self::decoded_signal(&raw, variant))
+    }
 
     /// `subghz_protocol_decoder_fiat_v1_serialize` (see the module doc, Key files).
-    fn to_flipper_key(&self, decoded: &DecodedSignal) -> Option<FlipperKey> { None }
+    fn to_flipper_key(&self, decoded: &DecodedSignal) -> Option<FlipperKey> {
+        let (raw, variant) = Self::raw_from_signal(decoded)?;
+        if !Self::frame_valid(&raw) {
+            return None;
+        }
+        let f = Self::fields(&raw);
+        let mut key = FlipperKey::for_protocol("Fiat V1", LOGICAL_BITS, (u64::from(f.uid) << 32) | u64::from(f.hop));
+        key.push_u32("Serial", f.uid);
+        key.push_u32("Btn", f.button.into());
+        key.push_u32("Cnt", f.control.into());
+        key.push_u32("Type", variant.into());
+        key.push_u32("Hop", f.hop);
+        key.push_u32("XOR", raw[12].into());
+        key.push_u32("Tail Bits", f.tail.into());
+        key.push_hex_bytes("Raw", &raw);
+        if let Some((hitag2_key, epoch)) = Self::file_key(&f) {
+            // doctor-firmware's `fiat_v1_hitag2_key_cipher_to_disk`: the standard order.
+            key.push_hex_bytes("Hitag2 Key", &KeyOrder::FiatBcm.standard(hitag2_key));
+            key.push_u32("Hitag2 Epoch", epoch);
+        }
+        let name = match f.button {
+            BUTTON_UNLOCK => "Unlock",
+            BUTTON_LOCK => "Lock",
+            BUTTON_TRUNK => "Trunk",
+            BUTTON_CLOSE => "Close",
+            _ => "Unknown",
+        };
+        key.push("Disp", format!("Fiat V1 - {name}"));
+        Some(key)
+    }
 }
 
 impl Default for FiatV1Decoder {

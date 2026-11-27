@@ -253,13 +253,38 @@ impl ProtocolDecoder for HoltekDecoder {
         None
     }
 
-    fn supports_encoding(&self) -> bool { false }
+    fn supports_encoding(&self) -> bool {
+        true
+    }
 
-    fn encode(&self, decoded: &DecodedSignal, button: u8) -> Option<Vec<LevelDuration>> { None }
+    fn encode(&self, decoded: &DecodedSignal, button: u8) -> Option<Vec<LevelDuration>> {
+        if decoded.data_count_bit != MIN_COUNT_BIT {
+            return None;
+        }
+        // The captured button re-sends the key untouched (the garage app's encoder); another
+        // native code rewrites the button word.
+        let (position, code) = (button >> 4, button & 0xF);
+        let captured = check_remote_controller(decoded.data).1;
+        let data = if button != captured
+            && decoded.data & HEADER_MASK == HEADER
+            && (1..=4).contains(&position)
+            && code != 0xA
+        {
+            with_button(decoded.data, position, code)
+        } else {
+            decoded.data
+        };
+        Some(with_repeats(&build_frame(data), TX_REPEAT))
+    }
 
-    fn from_flipper_key(&self, key: &FlipperKey) -> Option<DecodedSignal> { None }
+    fn from_flipper_key(&self, key: &FlipperKey) -> Option<DecodedSignal> {
+        let (bits, data) = generic_fields(key);
+        (bits == MIN_COUNT_BIT).then(|| decoded(data))
+    }
 
-    fn to_flipper_key(&self, d: &DecodedSignal) -> Option<FlipperKey> { None }
+    fn to_flipper_key(&self, d: &DecodedSignal) -> Option<FlipperKey> {
+        Some(generic_key(NAME, d))
+    }
 }
 
 #[cfg(test)]

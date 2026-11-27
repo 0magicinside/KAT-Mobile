@@ -400,19 +400,54 @@ impl ProtocolDecoder for SheriffCfmDecoder {
         None
     }
 
-    fn supports_encoding(&self) -> bool { false }
+    fn supports_encoding(&self) -> bool {
+        true
+    }
 
-    fn encode(&self, decoded: &DecodedSignal, button: u8) -> Option<Vec<LevelDuration>> { None }
+    fn encode(&self, decoded: &DecodedSignal, button: u8) -> Option<Vec<LevelDuration>> {
+        if decoded.data_count_bit != MIN_COUNT_BIT {
+            return None;
+        }
+        // Model (and the defaults for button/counter) come from the decrypt, as in the C encoder's
+        // deserialize; the signal's own button/counter take precedence (the C's Btn/Cnt fields).
+        let (model, det_btn, _serial, det_cnt) = try_decrypt(decoded.data)?;
+        let btn = Self::map_button(button, decoded.button.unwrap_or(det_btn));
+        let cnt = decoded.counter.unwrap_or(det_cnt);
+        // C: if (cnt + mult) > 0xFFFF then cnt = 0 else cnt += mult (mult = 1).
+        let cnt = cnt.checked_add(1).unwrap_or(0);
+        let fix = (decoded.data >> 32) as u32;
+        let once = upload(build_frame(model, btn, fix, cnt));
+        Some(once.repeat(TX_REPEAT))
+    }
 
     /// `subghz_protocol_decoder_sheriff_cfm_deserialize`: Bit must be 64; the model, button,
     /// serial and counter come from the decrypt (the file's Model/Serial/Btn/Cnt only matter to
     /// the C encoder's emulate overrides). A key that decrypts under neither model loads in the C
     /// with empty fields; KAT reports no such frame (and cannot encode one), so it returns None.
-    fn from_flipper_key(&self, key: &FlipperKey) -> Option<DecodedSignal> { None }
+    fn from_flipper_key(&self, key: &FlipperKey) -> Option<DecodedSignal> {
+        if key.bits != MIN_COUNT_BIT {
+            return None;
+        }
+        signal(key.key_u64()?)
+    }
 
     /// `subghz_protocol_decoder_sheriff_cfm_serialize`: Protocol "Sheriff CFM", Bit 64, Key, then
     /// Model (0 ZX-750, 1 ZX-930), Serial, Btn, Cnt (decimal) from the decrypt.
-    fn to_flipper_key(&self, decoded: &DecodedSignal) -> Option<FlipperKey> { None }
+    fn to_flipper_key(&self, decoded: &DecodedSignal) -> Option<FlipperKey> {
+        if decoded.data_count_bit != MIN_COUNT_BIT {
+            return None;
+        }
+        let (model, btn, serial, cnt) = try_decrypt(decoded.data)?;
+        let mut key = FlipperKey::for_protocol("Sheriff CFM", MIN_COUNT_BIT, decoded.data);
+        key.push_u32("Model", match model {
+            Model::Zx750 => 0,
+            Model::Zx930 => 1,
+        });
+        key.push_u32("Serial", serial);
+        key.push_u32("Btn", btn.into());
+        key.push_u32("Cnt", cnt.into());
+        Some(key)
+    }
 }
 
 impl Default for SheriffCfmDecoder {

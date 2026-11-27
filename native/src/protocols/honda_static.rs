@@ -505,16 +505,63 @@ impl ProtocolDecoder for HondaStaticDecoder {
         result
     }
 
-    fn supports_encoding(&self) -> bool { false }
+    fn supports_encoding(&self) -> bool {
+        true
+    }
 
-    fn encode(&self, decoded: &DecodedSignal, button: u8) -> Option<Vec<LevelDuration>> { None }
+    fn encode(&self, decoded: &DecodedSignal, button: u8) -> Option<Vec<LevelDuration>> {
+        // honda_static_encoder_deserialize: unpack the Key, then the file's Serial/Btn/Cnt
+        // override it. KAT's counter is the low 16 bits of the 24-bit counter; the top byte
+        // comes from the Key. The emulate scene writes Cnt = counter + 1 (masked to 24 bits).
+        let key = Self::unpack_compact(decoded.data);
+        let counter = match decoded.counter {
+            Some(low) => (key.counter & 0xFF_0000) | low as u32,
+            None => key.counter,
+        };
+        let fields = HondaStaticFields {
+            button: Self::map_button(button, decoded.button.unwrap_or(key.button), key.button),
+            serial: decoded.serial.unwrap_or(key.serial),
+            counter: counter.wrapping_add(1) & 0x00FF_FFFF,
+            checksum: 0,
+        };
+        Some(Self::build_upload(&Self::build_packet_bytes(&fields)))
+    }
 
     /// `subghz_protocol_decoder_honda_static_deserialize` (see the module doc, Key files).
-    fn from_flipper_key(&self, key: &FlipperKey) -> Option<DecodedSignal> { None }
+    fn from_flipper_key(&self, key: &FlipperKey) -> Option<DecodedSignal> {
+        if key.bits != BIT_COUNT {
+            return None;
+        }
+        let mut fields = Self::unpack_compact(key.key_u64()?);
+        if let Some(serial) = key.u32_field("Serial") {
+            fields.serial = serial;
+        }
+        if let Some(button) = key.u32_field("Btn") {
+            fields.button = button as u8;
+        }
+        if let Some(counter) = key.u32_field("Cnt") {
+            fields.counter = counter & 0x00FF_FFFF;
+        }
+        // honda_static_pack_compact, then the fields as the packed Key holds them.
+        let fields = Self::unpack_compact(Self::pack_compact(&fields));
+        let checksum = Self::build_packet_bytes(&fields)[7];
+        let verified = key.u32_field("Checksum") == Some(checksum.into());
+        Some(Self::build_signal(&fields, verified))
+    }
 
     /// `subghz_protocol_decoder_honda_static_serialize`; Checksum only for a verified frame (see
     /// the module doc, Key files).
-    fn to_flipper_key(&self, decoded: &DecodedSignal) -> Option<FlipperKey> { None }
+    fn to_flipper_key(&self, decoded: &DecodedSignal) -> Option<FlipperKey> {
+        let fields = Self::unpack_compact(decoded.data);
+        let mut key = FlipperKey::for_protocol("Honda Static", BIT_COUNT, Self::pack_compact(&fields));
+        key.push_u32("Serial", fields.serial);
+        key.push_u32("Btn", fields.button.into());
+        key.push_u32("Cnt", fields.counter);
+        if decoded.crc_valid {
+            key.push_u32("Checksum", Self::build_packet_bytes(&fields)[7].into());
+        }
+        Some(key)
+    }
 }
 
 impl Default for HondaStaticDecoder {

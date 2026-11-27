@@ -213,16 +213,33 @@ impl ProtocolDecoder for AudiV2Decoder {
         None
     }
 
-    fn supports_encoding(&self) -> bool { false }
+    fn supports_encoding(&self) -> bool {
+        false
+    }
 
-    fn encode(&self, _decoded: &DecodedSignal, _button: u8) -> Option<Vec<LevelDuration>> { None }
+    fn encode(&self, _decoded: &DecodedSignal, _button: u8) -> Option<Vec<LevelDuration>> {
+        None
+    }
 
     /// `subghz_protocol_decoder_audi_v2_deserialize`: `Bit: 72`, the key, and the optional
     /// `Trailer` (0 when absent); the C accepts any trailer, `crc_valid` says whether it is 0x93.
-    fn from_flipper_key(&self, key: &FlipperKey) -> Option<DecodedSignal> { None }
+    fn from_flipper_key(&self, key: &FlipperKey) -> Option<DecodedSignal> {
+        if key.bits != usize::from(DATA_BITS) {
+            return None;
+        }
+        let trailer = key.u32_field("Trailer").map_or(0, |t| (t & 0xFF) as u8);
+        Some(signal(key.key, trailer))
+    }
 
     /// `subghz_protocol_decoder_audi_v2_serialize`: the generic Key, then `Trailer`.
-    fn to_flipper_key(&self, decoded: &DecodedSignal) -> Option<FlipperKey> { None }
+    fn to_flipper_key(&self, decoded: &DecodedSignal) -> Option<FlipperKey> {
+        if decoded.data_count_bit != usize::from(DATA_BITS) {
+            return None;
+        }
+        let mut key = FlipperKey::for_protocol(NAME, usize::from(DATA_BITS), decoded.data);
+        key.push_u32("Trailer", (decoded.extra? & 0xFF) as u32);
+        Some(key)
+    }
 }
 
 /// Synthetic captures for the tests.

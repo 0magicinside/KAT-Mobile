@@ -218,16 +218,32 @@ impl ProtocolDecoder for BmwV2Decoder {
         None
     }
 
-    fn supports_encoding(&self) -> bool { false }
+    fn supports_encoding(&self) -> bool {
+        false
+    }
 
-    fn encode(&self, _decoded: &DecodedSignal, _button: u8) -> Option<Vec<LevelDuration>> { None }
+    fn encode(&self, _decoded: &DecodedSignal, _button: u8) -> Option<Vec<LevelDuration>> {
+        None
+    }
 
     /// `subghz_protocol_decoder_bmw_v2_deserialize`: `Bit: 56` and the key; the fields are carved
     /// from it (the extra lines are not read, and no header / trailer / serial gate is applied).
-    fn from_flipper_key(&self, key: &FlipperKey) -> Option<DecodedSignal> { None }
+    fn from_flipper_key(&self, key: &FlipperKey) -> Option<DecodedSignal> {
+        (key.bits == usize::from(DATA_BITS)).then(|| signal(key.key))
+    }
 
     /// `subghz_protocol_decoder_bmw_v2_serialize`: the generic Key, then `Serial`, `Cnt`, `Hdr`, `Trl`.
-    fn to_flipper_key(&self, decoded: &DecodedSignal) -> Option<FlipperKey> { None }
+    fn to_flipper_key(&self, decoded: &DecodedSignal) -> Option<FlipperKey> {
+        if decoded.data_count_bit != usize::from(DATA_BITS) {
+            return None;
+        }
+        let mut key = FlipperKey::for_protocol(NAME, usize::from(DATA_BITS), decoded.data);
+        key.push_u32("Serial", decoded.serial?);
+        key.push_u32("Cnt", u32::from(decoded.counter?));
+        key.push_u32("Hdr", ((decoded.data >> 48) & 0xFF) as u32);
+        key.push_u32("Trl", (decoded.data & 0xFF) as u32);
+        Some(key)
+    }
 }
 
 /// Synthetic captures for the tests.

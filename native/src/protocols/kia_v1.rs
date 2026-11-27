@@ -252,17 +252,61 @@ impl ProtocolDecoder for KiaV1Decoder {
         None
     }
 
-    fn supports_encoding(&self) -> bool { false }
+    fn supports_encoding(&self) -> bool {
+        true
+    }
 
-    fn encode(&self, decoded: &DecodedSignal, button: u8) -> Option<Vec<LevelDuration>> { None }
+    fn encode(&self, decoded: &DecodedSignal, button: u8) -> Option<Vec<LevelDuration>> {
+        let parsed = parse_frame(decoded.data);
+        let serial = decoded.serial.or(parsed.serial)?;
+        let captured = decoded.button.or(parsed.button).unwrap_or(0);
+        let counter = decoded.counter.or(parsed.counter).unwrap_or(0).wrapping_add(1) & 0x0FFF;
+        let button = match button {
+            0x01 => 0x1,
+            0x02 => 0x2,
+            0x04 => 0x3,
+            0x08 => 0x4,
+            _ => captured,
+        };
+        Some(build_upload(build_frame(serial, button, counter)))
+    }
 
     /// `kia_protocol_decoder_v1_deserialize` (Bit must be 57) + the encoder's use of
     /// Serial/Btn/Cnt: a file whose fields differ from its Key's is rebuilt from them (see the
     /// module docs).
-    fn from_flipper_key(&self, key: &FlipperKey) -> Option<DecodedSignal> { None }
+    fn from_flipper_key(&self, key: &FlipperKey) -> Option<DecodedSignal> {
+        if key.bits != MIN_COUNT_BIT {
+            return None;
+        }
+        let data = key.key_u64()?;
+        let d = parse_frame(data);
+        let (serial, button, counter) = (key.u32_field("Serial"), key.u32_field("Btn"), key.u32_field("Cnt"));
+        if serial.is_none() && button.is_none() && counter.is_none() {
+            return Some(d);
+        }
+        let fields = (
+            serial.or(d.serial)?,
+            button.map_or(d.button, |b| Some(b as u8))?,
+            counter.map_or(d.counter, |c| Some((c & 0x0FFF) as u16))?,
+        );
+        if fields == (d.serial?, d.button?, d.counter?) {
+            return Some(d);
+        }
+        Some(parse_frame(build_frame(fields.0, fields.1, fields.2)))
+    }
 
     /// `kia_protocol_decoder_v1_serialize`: "Kia V1", 57 bits, Key, then Serial, Btn, Cnt.
-    fn to_flipper_key(&self, decoded: &DecodedSignal) -> Option<FlipperKey> { None }
+    fn to_flipper_key(&self, decoded: &DecodedSignal) -> Option<FlipperKey> {
+        if decoded.data_count_bit != MIN_COUNT_BIT {
+            return None;
+        }
+        let f = parse_frame(decoded.data);
+        let mut key = FlipperKey::for_protocol("Kia V1", MIN_COUNT_BIT, decoded.data);
+        key.push_u32("Serial", f.serial?);
+        key.push_u32("Btn", f.button?.into());
+        key.push_u32("Cnt", f.counter?.into());
+        Some(key)
+    }
 }
 
 impl Default for KiaV1Decoder {

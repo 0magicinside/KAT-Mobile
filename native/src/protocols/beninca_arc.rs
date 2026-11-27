@@ -289,13 +289,57 @@ impl ProtocolDecoder for BenincaArcDecoder {
         None
     }
 
-    fn supports_encoding(&self) -> bool { false }
+    fn supports_encoding(&self) -> bool {
+        true
+    }
 
-    fn encode(&self, decoded: &DecodedSignal, button: u8) -> Option<Vec<LevelDuration>> { None }
+    fn encode(&self, decoded: &DecodedSignal, button: u8) -> Option<Vec<LevelDuration>> {
+        if decoded.data_count_bit != MIN_COUNT_BIT {
+            return None;
+        }
+        let p = decrypt(decoded.data, decoded.extra?)?;
+        if p.constant != CONSTANT {
+            return None;
+        }
+        // Any 8-bit code is a native Beninca button (the C's button override masks to 8 bits).
+        let mut p = Plain {
+            cnt: next_counter(p.cnt, u32::MAX),
+            btn: button,
+            ..p
+        };
+        let mut out = Vec::with_capacity(TX_REPEAT * 3 * 258);
+        let mut packets = Vec::with_capacity(3 * 258);
+        for i in 0..3u64 {
+            p.middle = (i + 1) * 2;
+            let (data, data_2) = encrypt(&p)?;
+            packet(data, data_2, &mut packets);
+        }
+        for _ in 0..TX_REPEAT {
+            for ld in &packets {
+                push(&mut out, ld.level, ld.duration_us);
+            }
+        }
+        Some(out)
+    }
 
-    fn from_flipper_key(&self, key: &FlipperKey) -> Option<DecodedSignal> { None }
+    fn from_flipper_key(&self, key: &FlipperKey) -> Option<DecodedSignal> {
+        // `subghz_protocol_decoder_beninca_arc_deserialize`: Bit must be 128, Key + Data (8 bytes).
+        // A frame without the 0xAA55 constant is refused (the C loads it and shows "Fx").
+        if key.bits != MIN_COUNT_BIT {
+            return None;
+        }
+        signal(key8(key)?, hex8_field(key, "Data")?).filter(|d| d.crc_valid)
+    }
 
-    fn to_flipper_key(&self, decoded: &DecodedSignal) -> Option<FlipperKey> { None }
+    fn to_flipper_key(&self, decoded: &DecodedSignal) -> Option<FlipperKey> {
+        if decoded.data_count_bit != MIN_COUNT_BIT {
+            return None;
+        }
+        // `subghz_protocol_decoder_beninca_arc_serialize`: generic block + "Data" = data_2.
+        let mut k = FlipperKey::new(NAME, MIN_COUNT_BIT, decoded.data, 0, "");
+        k.push_hex("Data", decoded.extra?, 8);
+        Some(k)
+    }
 }
 
 /// A key file for a random valid frame (oracle driver fixtures): `r` seeds the fields.

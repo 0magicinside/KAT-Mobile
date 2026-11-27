@@ -1008,9 +1008,41 @@ impl super::ProtocolDecoder for KeeloqDecoder {
         None
     }
 
-    fn supports_encoding(&self) -> bool { false }
+    fn supports_encoding(&self) -> bool {
+        true
+    }
 
-    fn encode(&self, decoded: &DecodedSignal, button: u8) -> Option<Vec<LevelDuration>> { None }
+    fn encode(&self, decoded: &DecodedSignal, button: u8) -> Option<Vec<LevelDuration>> {
+        if decoded.data_count_bit != MIN_COUNT_BIT {
+            return None;
+        }
+        let (fix, hop) = fix_hop(decoded.data);
+        // The manufacturer the capture names (its key file's, as ARF's encoder reads it), else the
+        // decoder's identification.
+        let ident = named_ident(decoded, fix, hop).or_else(|| identify(fix, hop));
+        let orig_btn = match &ident {
+            Some(i) => fields(fix, hop, i).1,
+            None => (fix >> 28) as u8,
+        };
+        let btn = if (0x01..=0x0F).contains(&button) {
+            button
+        } else {
+            orig_btn
+        };
+        let data = gen_data(
+            decoded.data,
+            btn,
+            ident.as_ref(),
+            decoded.counter.unwrap_or(0),
+        );
+        let mf = ident.as_ref().map_or("Unknown", Ident::name);
+        let te = extra_te(decoded.extra);
+        let mut signal = Vec::with_capacity(TX_REPEAT * 160);
+        for _ in 0..TX_REPEAT {
+            upload_once(data, mf, te, &mut signal);
+        }
+        Some(signal)
+    }
 
     /// Key files: Flipper-ARF `subghz_protocol_decoder_keeloq_deserialize` (Bit must be 64; `Seed`
     /// = 4 hex bytes; `Manufacture`, with ARF's "Sommer(fsk476)" → "Sommer" fix) + the
@@ -1028,7 +1060,36 @@ impl super::ProtocolDecoder for KeeloqDecoder {
     /// BFT key with a user-chosen seed: a seed the decode flow cannot reproduce is kept in `extra`,
     /// for the encoder and so the key file can be written back). A forced AN-Motors / HCS101 that
     /// the frame does not confirm is shown but not transmitted.
-    fn from_flipper_key(&self, key: &super::FlipperKey) -> Option<DecodedSignal> { None }
+    fn from_flipper_key(&self, key: &super::FlipperKey) -> Option<DecodedSignal> {
+        if key.bits != MIN_COUNT_BIT {
+            return None;
+        }
+        let data = key.key_u64()?;
+        // RogueMaster: `TE` (written for half-rate captures only) is the rate the frame is sent at.
+        let te = te_sanitize(key.u32_field("TE").unwrap_or(TE_SHORT));
+        let manufacturer = match key.field("Manufacture").map(str::trim) {
+            Some("Sommer(fsk476)") => Some("Sommer"),
+            other => other,
+        };
+        match manufacturer {
+            None | Some("") | Some("Unknown") => Self::parse_data_te(data, te),
+            Some(mf) => {
+                let (fix, hop) = fix_hop(data);
+                let seed = key
+                    .hex_bytes_field("Seed")
+                    .and_then(|b| <[u8; 4]>::try_from(b.as_slice()).ok())
+                    .map(u32::from_be_bytes);
+                match key_file_identify(fix, hop, mf, seed) {
+                    Some(ident) => Some(key_file_signal(data, fix, hop, &ident, te)),
+                    // A name KAT's keystore lacks (doctor-firmware's "Star", "Wisniowski2" …), or
+                    // one whose key does not validate the frame: the C loads the file all the
+                    // same and shows what its selector finds ("Unknown" at worst), so KAT
+                    // identifies the frame like one on air.
+                    None => Self::parse_data_te(data, te),
+                }
+            }
+        }
+    }
 
     /// Key files: Flipper-ARF `subghz_protocol_decoder_keeloq_serialize`: Protocol "KeeLoq", Bit
     /// 64, Key, then — for BFT, and as doctor-firmware / RogueMaster also for Erreka, Monarch,
@@ -1036,7 +1097,34 @@ impl super::ProtocolDecoder for KeeloqDecoder {
     /// bytes, the seed the decrypt used) and `Manufacture` (the decode's `(<manufacturer>)`,
     /// re-checked against the key as the C re-runs its check; "Unknown" when nothing validates); RogueMaster's `TE: 200` after it for a
     /// half-rate frame only (standard frames keep the layout older builds read).
-    fn to_flipper_key(&self, decoded: &DecodedSignal) -> Option<super::FlipperKey> { None }
+    fn to_flipper_key(&self, decoded: &DecodedSignal) -> Option<super::FlipperKey> {
+        if decoded.data_count_bit != MIN_COUNT_BIT {
+            return None;
+        }
+        let (fix, hop) = fix_hop(decoded.data);
+        let named = decoded
+            .protocol_display_name
+            .as_deref()
+            .and_then(|n| n.strip_prefix("KeeLoq ("))
+            .and_then(|n| n.strip_suffix(')'))
+            .filter(|&n| n != "Unknown");
+        let ident = match named {
+            Some(mf) => key_file_identify(fix, hop, mf, extra_seed(decoded.extra)),
+            None => identify(fix, hop),
+        };
+        let mut key = super::FlipperKey::for_protocol("KeeLoq", MIN_COUNT_BIT, decoded.data);
+        if let Some(Ident::Key(m)) = &ident {
+            if matches!(m.entry.name.as_str(), "BFT" | "Erreka" | "Monarch" | "Phantom_Hiland" | "Dea_Mio") {
+                key.push_hex("Seed", u64::from(m.seed), 4);
+            }
+        }
+        key.push("Manufacture", ident.as_ref().map_or("Unknown", Ident::name));
+        let te = extra_te(decoded.extra);
+        if te != TE_SHORT {
+            key.push("TE", te.to_string());
+        }
+        Some(key)
+    }
 }
 
 /// Key files: the C's `check_remote_controller` with a saved manufacturer (see

@@ -441,9 +441,36 @@ impl ProtocolDecoder for MazdaInfinityDecoder {
         }
     }
 
-    fn supports_encoding(&self) -> bool { false }
+    fn supports_encoding(&self) -> bool {
+        true
+    }
 
-    fn encode(&self, decoded: &DecodedSignal, button: u8) -> Option<Vec<LevelDuration>> { None }
+    fn encode(&self, decoded: &DecodedSignal, button: u8) -> Option<Vec<LevelDuration>> {
+        let mut logical = decoded.data.to_be_bytes();
+        if !frame_valid(&logical) {
+            return None;
+        }
+
+        let original_btn = logical[4];
+        let new_btn = Self::map_button(button).unwrap_or(original_btn);
+        if new_btn != original_btn {
+            // Fresh press on another button: re-stamp b4 and advance the 16-bit counter by the
+            // C's default rolling_counter_mult (1).
+            let base = decoded.counter.unwrap_or_else(|| counter(&logical));
+            let new_cnt = base.wrapping_add(1);
+            logical[4] = new_btn;
+            logical[5..7].copy_from_slice(&new_cnt.to_be_bytes());
+        }
+        logical[7] = checksum(&logical);
+        let wire = logical_to_wire(&logical);
+
+        let mut signal = Vec::with_capacity(TX_REPEAT * (PREAMBLE_BYTES + WINDOW_BYTES) * 16 + 2);
+        for _ in 0..TX_REPEAT {
+            Self::enc_frame(&mut signal, &wire);
+        }
+        Self::enc_add_level(&mut signal, false, GAP_US);
+        Some(signal)
+    }
 }
 
 impl Default for MazdaInfinityDecoder {

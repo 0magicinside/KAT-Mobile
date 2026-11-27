@@ -229,16 +229,38 @@ impl ProtocolDecoder for FiatMarelliDecoder {
         None
     }
 
-    fn supports_encoding(&self) -> bool { false }
+    fn supports_encoding(&self) -> bool {
+        true
+    }
 
     /// The saved frame, 3 times, whatever `button` asks (replay only, as the C).
-    fn encode(&self, decoded: &DecodedSignal, _button: u8) -> Option<Vec<LevelDuration>> { None }
+    fn encode(&self, decoded: &DecodedSignal, _button: u8) -> Option<Vec<LevelDuration>> {
+        let packed = decoded.extra?;
+        let (te, extra) = ((packed >> 32) as u32, packed as u32);
+        let raw = rebuild(decoded.data, extra, decoded.data_count_bit, true);
+        let one = upload(&raw, decoded.data_count_bit, te)?;
+        Some(one.iter().copied().cycle().take(REPEAT * one.len()).collect())
+    }
 
     /// `subghz_protocol_decoder_fiat_marelli_deserialize`.
-    fn from_flipper_key(&self, key: &FlipperKey) -> Option<DecodedSignal> { None }
+    fn from_flipper_key(&self, key: &FlipperKey) -> Option<DecodedSignal> {
+        (key.bits > 0).then(|| {
+            decode_of(key.key, key.u32_field("Extra").unwrap_or(0), key.bits, key.u32_field("TE").unwrap_or(0))
+        })
+    }
 
     /// `subghz_protocol_decoder_fiat_marelli_serialize`.
-    fn to_flipper_key(&self, decoded: &DecodedSignal) -> Option<FlipperKey> { None }
+    fn to_flipper_key(&self, decoded: &DecodedSignal) -> Option<FlipperKey> {
+        let packed = decoded.extra?;
+        let mut key = FlipperKey::for_protocol(NAME, decoded.data_count_bit, decoded.data);
+        key.push_u32("Extra", packed as u32);
+        key.push_u32("Extra_bits", decoded.data_count_bit.saturating_sub(64) as u32);
+        key.push_u32("TE", (packed >> 32) as u32);
+        key.push_u32("Serial", decoded.serial.unwrap_or(0));
+        key.push_u32("Btn", decoded.button.unwrap_or(0).into());
+        key.push_u32("Cnt", decoded.counter.unwrap_or(0).into());
+        Some(key)
+    }
 }
 
 #[cfg(test)]

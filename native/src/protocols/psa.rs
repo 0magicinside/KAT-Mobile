@@ -1942,18 +1942,46 @@ impl ProtocolDecoder for PsaDecoder {
         out
     }
 
-    fn supports_encoding(&self) -> bool { false }
+    fn supports_encoding(&self) -> bool {
+        true
+    }
 
     /// ProtoPirate `subghz_protocol_encoder_psa_deserialize` + `psa_encoder_build_upload`. The
     /// references read Serial/Btn/Cnt/Type/CRC from the saved file; KAT re-derives them from the
     /// captured key1/key2 (+ the brute-forced serial for TEA frames), then sends counter + 1 with
     /// the requested button, 10 copies.
-    fn encode(&self, decoded: &DecodedSignal, button: u8) -> Option<Vec<LevelDuration>> { None }
+    fn encode(&self, decoded: &DecodedSignal, button: u8) -> Option<Vec<LevelDuration>> {
+        let key1 = decoded.data;
+        let key2_low = decoded.extra.unwrap_or(0) as u32;
+        let fields = next_fields(decoded, button)?;
+        let upload = build_upload(key1, key2_low, &fields);
+        let mut signal = Vec::with_capacity(ENC_REPEAT * upload.len());
+        for _ in 0..ENC_REPEAT {
+            signal.extend_from_slice(&upload);
+        }
+        Some(signal)
+    }
 
     /// The frame `encode` sends, as the decoder reports it (Flipper-ARF writes the same `Key` /
     /// `Key_2` back after building the upload). Needed because a TEA frame only decrypts under the
     /// capture's recovered serial: its fields are the ones encoded.
-    fn sent_signal(&self, decoded: &DecodedSignal, button: u8) -> Option<DecodedSignal> { None }
+    fn sent_signal(&self, decoded: &DecodedSignal, button: u8) -> Option<DecodedSignal> {
+        let fields = next_fields(decoded, button)?;
+        let (key1, validation) = frame_words(decoded.data, decoded.extra.unwrap_or(0) as u32, &fields);
+        let d = self.emit(RawFrame { key1, key2_high: 0, key2_low: u32::from(validation), am: false })?;
+        Some(if d.serial.is_some() {
+            d
+        } else {
+            DecodedSignal {
+                serial: Some(fields.serial),
+                button: Some(fields.button),
+                counter: Some(fields.counter as u16),
+                crc_valid: true,
+                encoder_capable: true,
+                ..d
+            }
+        })
+    }
 
     /// Key files: ProtoPirate `subghz_protocol_decoder_psa_deserialize` (Key + Key_2, then
     /// `psa_decrypt_router`: PP's XOR fast path) gives the decoder's report for the frame. A TEA
@@ -1962,7 +1990,33 @@ impl ProtocolDecoder for PsaDecoder {
     /// that serial's key decrypts it (`tea_decrypt_with_serial`, a 2^-32 check), as after the
     /// signal menu's "Recover key"; the other fields always come from the decrypt. Field values
     /// are decimal, except in Flipper-ARF's "PSA GROUP" / "PSA OLD" files (hex bytes).
-    fn from_flipper_key(&self, key: &FlipperKey) -> Option<DecodedSignal> { None }
+    fn from_flipper_key(&self, key: &FlipperKey) -> Option<DecodedSignal> {
+        let key1 = key.key_u64()?;
+        let key2 = key.hex_field("Key_2")?;
+        let frame = RawFrame { key1, key2_high: (key2 >> 32) as u32, key2_low: key2 as u32, am: false };
+        let d = self.emit(frame)?;
+        if d.serial.is_some() {
+            return Some(d);
+        }
+        // Flipper-ARF ("PSA GROUP", and its retired psa2.c "PSA OLD") writes hex-byte fields.
+        let arf = ["PSA GROUP", "PSA OLD"].iter().any(|n| key.protocol.trim().eq_ignore_ascii_case(n));
+        let number = |name: &str| if arf { key.hex_field(name).map(|v| v as u32) } else { key.u32_field(name) };
+        let recovered = (number("Type") == Some(u32::from(MODE_TEA)))
+            .then(|| number("Serial"))
+            .flatten()
+            .and_then(|serial| tea_decrypt_with_serial(key1, key2 as u32, serial));
+        Some(match recovered {
+            Some((f, _)) => DecodedSignal {
+                serial: Some(f.serial),
+                button: Some(f.button),
+                counter: Some(f.counter as u16),
+                crc_valid: true,
+                encoder_capable: true,
+                ..d
+            },
+            None => d,
+        })
+    }
 
     /// Key files: ProtoPirate `subghz_protocol_decoder_psa_serialize`: Protocol "PSA", Bit 128,
     /// Key (key1), Key_2 (key2, 8 bytes), ValidationField (key2's low 16 bits), and for a decrypted
@@ -1970,7 +2024,26 @@ impl ProtocolDecoder for PsaDecoder {
     /// TEA), CRC and Seed (= serial), decimal. A TEA frame is written decrypted once its serial is
     /// known (after "Recover key"). None for captures without key2 (the retired PSA2 decoder's),
     /// which a key file cannot carry.
-    fn to_flipper_key(&self, decoded: &DecodedSignal) -> Option<FlipperKey> { None }
+    fn to_flipper_key(&self, decoded: &DecodedSignal) -> Option<FlipperKey> {
+        let key2 = decoded.extra?;
+        let (key1, key2_low) = (decoded.data, key2 as u32);
+        let fields = kat_decrypt(key1, key2_low).or_else(|| {
+            decoded.serial.and_then(|s| tea_decrypt_with_serial(key1, key2_low, s).map(|(f, _)| f))
+        });
+        let mut key = FlipperKey::for_protocol("PSA", MIN_COUNT_BIT, key1);
+        key.key_word = true;
+        key.push("Key_2", format!("{key2:016X}"));
+        key.push_u32("ValidationField", key2_low & 0xFFFF);
+        if let Some(f) = fields {
+            key.push_u32("Serial", f.serial);
+            key.push_u32("Btn", f.button.into());
+            key.push_u32("Cnt", f.counter);
+            key.push_u32("Type", f.mode.into());
+            key.push_u32("CRC", f.crc.into());
+            key.push_u32("Seed", f.serial);
+        }
+        Some(key)
+    }
 }
 
 impl Default for PsaDecoder {

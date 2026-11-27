@@ -236,15 +236,26 @@ impl ProtocolDecoder for OpelV0Decoder {
         None
     }
 
-    fn supports_encoding(&self) -> bool { false }
+    fn supports_encoding(&self) -> bool {
+        false
+    }
 
-    fn encode(&self, _decoded: &DecodedSignal, _button: u8) -> Option<Vec<LevelDuration>> { None }
+    fn encode(&self, _decoded: &DecodedSignal, _button: u8) -> Option<Vec<LevelDuration>> {
+        None
+    }
 
     /// `subghz_protocol_decoder_opel_v0_deserialize` (see "Key files": the C needs 40 bits).
-    fn from_flipper_key(&self, key: &FlipperKey) -> Option<DecodedSignal> { None }
+    fn from_flipper_key(&self, key: &FlipperKey) -> Option<DecodedSignal> {
+        if key.bits != MIN_BITS {
+            return None;
+        }
+        Some(DecodedSignal::new(key.key_u64()?, MIN_BITS))
+    }
 
     /// The common `subghz_protocol_decoder_common_serialize`.
-    fn to_flipper_key(&self, decoded: &DecodedSignal) -> Option<FlipperKey> { None }
+    fn to_flipper_key(&self, decoded: &DecodedSignal) -> Option<FlipperKey> {
+        Some(FlipperKey::for_protocol("Opel V0", decoded.data_count_bit, decoded.data))
+    }
 }
 
 #[cfg(test)]

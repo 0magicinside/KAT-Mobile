@@ -239,16 +239,42 @@ impl ProtocolDecoder for HondaV10Decoder {
         None
     }
 
-    fn supports_encoding(&self) -> bool { false }
+    fn supports_encoding(&self) -> bool {
+        false
+    }
 
-    fn encode(&self, _decoded: &DecodedSignal, _button: u8) -> Option<Vec<LevelDuration>> { None }
+    fn encode(&self, _decoded: &DecodedSignal, _button: u8) -> Option<Vec<LevelDuration>> {
+        None
+    }
 
     /// Rebuild a decode from a key file written by [Self::to_flipper_key]; the C's gate (flags 7,
     /// button 0xE / 0xF) is re-applied.
-    fn from_flipper_key(&self, key: &FlipperKey) -> Option<DecodedSignal> { None }
+    fn from_flipper_key(&self, key: &FlipperKey) -> Option<DecodedSignal> {
+        if key.bits != FRAME_BITS {
+            return None;
+        }
+        let data = key.key_u64()?;
+        let d = fields(data, key.u32_field("Tail")?);
+        let b3 = data.to_be_bytes()[3];
+        ((b3 >> 4) >= 0xE && b3 & 0xF == 7).then_some(d)
+    }
 
     /// `subghz_protocol_decoder_honda_v10_serialize`.
-    fn to_flipper_key(&self, decoded: &DecodedSignal) -> Option<FlipperKey> { None }
+    fn to_flipper_key(&self, decoded: &DecodedSignal) -> Option<FlipperKey> {
+        if decoded.data_count_bit != FRAME_BITS {
+            return None;
+        }
+        let d = decoded.data.to_be_bytes();
+        let counter = 0x00FF_FFFF ^ ((u32::from(d[4]) << 16) | (u32::from(d[5]) << 8) | u32::from(d[6]));
+        let mut key = FlipperKey::for_protocol(NAME, FRAME_BITS, decoded.data);
+        key.push_u32("Serial", decoded.serial?);
+        key.push_u32("Btn", decoded.button?.into());
+        key.push_u32("Cnt", counter);
+        key.push_u32("Flags", u32::from(d[3] & 0xF));
+        key.push_u32("Status", u32::from(d[7]));
+        key.push_u32("Tail", decoded.extra? as u32);
+        Some(key)
+    }
 }
 
 #[cfg(test)]

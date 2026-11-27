@@ -287,13 +287,37 @@ impl ProtocolDecoder for SomfyTelisDecoder {
         None
     }
 
-    fn supports_encoding(&self) -> bool { false }
+    fn supports_encoding(&self) -> bool {
+        true
+    }
 
-    fn encode(&self, decoded: &DecodedSignal, button: u8) -> Option<Vec<LevelDuration>> { None }
+    fn encode(&self, decoded: &DecodedSignal, button: u8) -> Option<Vec<LevelDuration>> {
+        if decoded.data_count_bit != BIT_COUNT as usize {
+            return None;
+        }
+        let data = next_frame(decoded.data, (button <= 0xF).then_some(button));
+        let mut out = Vec::new();
+        for _ in 0..TX_REPEAT {
+            push_upload(&mut out, data);
+        }
+        Some(out)
+    }
 
-    fn from_flipper_key(&self, key: &FlipperKey) -> Option<DecodedSignal> { None }
+    fn from_flipper_key(&self, key: &FlipperKey) -> Option<DecodedSignal> {
+        (key.bits == BIT_COUNT as usize).then(|| decoded_from_data(key.key))
+    }
 
-    fn to_flipper_key(&self, decoded: &DecodedSignal) -> Option<FlipperKey> { None }
+    fn to_flipper_key(&self, decoded: &DecodedSignal) -> Option<FlipperKey> {
+        (decoded.data_count_bit == BIT_COUNT as usize).then(|| {
+            FlipperKey::new(
+                NAME,
+                BIT_COUNT as usize,
+                decoded.data,
+                0,
+                "FuriHalSubGhzPresetOok650Async",
+            )
+        })
+    }
 }
 
 #[cfg(test)]

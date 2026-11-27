@@ -328,13 +328,29 @@ impl ProtocolDecoder for CameTweeDecoder {
         out
     }
 
-    fn supports_encoding(&self) -> bool { false }
+    fn supports_encoding(&self) -> bool {
+        true
+    }
 
-    fn encode(&self, decoded: &DecodedSignal, button: u8) -> Option<Vec<LevelDuration>> { None }
+    fn encode(&self, decoded: &DecodedSignal, button: u8) -> Option<Vec<LevelDuration>> {
+        if decoded.data_count_bit != MIN_COUNT_BIT {
+            return None;
+        }
+        let (mut serial, _, _) = remote_controller(decoded.data);
+        if button <= 0x0F {
+            serial = (serial & !(0x0F << 6)) | (button as u32) << 6;
+        }
+        Some(with_repeats(&build_upload(serial), TX_REPEAT))
+    }
 
-    fn from_flipper_key(&self, key: &FlipperKey) -> Option<DecodedSignal> { None }
+    fn from_flipper_key(&self, key: &FlipperKey) -> Option<DecodedSignal> {
+        let (bits, data) = generic_fields(key);
+        (bits == MIN_COUNT_BIT).then(|| decoded(data))
+    }
 
-    fn to_flipper_key(&self, d: &DecodedSignal) -> Option<FlipperKey> { None }
+    fn to_flipper_key(&self, d: &DecodedSignal) -> Option<FlipperKey> {
+        Some(generic_key(NAME, d))
+    }
 }
 
 #[cfg(test)]

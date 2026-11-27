@@ -348,10 +348,14 @@ impl ProtocolDecoder for HondaV6Decoder {
         None
     }
 
-    fn supports_encoding(&self) -> bool { false }
+    fn supports_encoding(&self) -> bool {
+        true
+    }
 
     /// The captured block again (no next code can be computed, see the module doc).
-    fn encode(&self, decoded: &DecodedSignal, _button: u8) -> Option<Vec<LevelDuration>> { None }
+    fn encode(&self, decoded: &DecodedSignal, _button: u8) -> Option<Vec<LevelDuration>> {
+        (decoded.data_count_bit == DATA_BITS).then(|| upload(decoded.data))
+    }
 }
 
 #[cfg(test)]

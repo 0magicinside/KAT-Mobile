@@ -193,13 +193,25 @@ impl ProtocolDecoder for DickertMahsDecoder {
         result
     }
 
-    fn supports_encoding(&self) -> bool { false }
+    fn supports_encoding(&self) -> bool {
+        true
+    }
 
-    fn encode(&self, decoded: &DecodedSignal, _button: u8) -> Option<Vec<LevelDuration>> { None }
+    fn encode(&self, decoded: &DecodedSignal, _button: u8) -> Option<Vec<LevelDuration>> {
+        let bits = decoded.data_count_bit;
+        (MIN_COUNT_BIT..=MAX_TX_BITS)
+            .contains(&bits)
+            .then(|| repeated(&upload(decoded.data, bits), REPEAT))
+    }
 
-    fn from_flipper_key(&self, key: &FlipperKey) -> Option<DecodedSignal> { None }
+    fn from_flipper_key(&self, key: &FlipperKey) -> Option<DecodedSignal> {
+        let (data, bits) = key_data(key, |bits| bits >= MIN_COUNT_BIT)?;
+        Some(frame(data, bits))
+    }
 
-    fn to_flipper_key(&self, decoded: &DecodedSignal) -> Option<FlipperKey> { None }
+    fn to_flipper_key(&self, decoded: &DecodedSignal) -> Option<FlipperKey> {
+        Some(key_file(NAME, decoded))
+    }
 }
 
 #[cfg(test)]

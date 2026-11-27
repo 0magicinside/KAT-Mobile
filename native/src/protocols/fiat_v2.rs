@@ -634,15 +634,64 @@ impl ProtocolDecoder for FiatV2Decoder {
         self.commit(raw)
     }
 
-    fn supports_encoding(&self) -> bool { false }
+    fn supports_encoding(&self) -> bool {
+        true
+    }
 
-    fn encode(&self, decoded: &DecodedSignal, button: u8) -> Option<Vec<LevelDuration>> { None }
+    fn encode(&self, decoded: &DecodedSignal, button: u8) -> Option<Vec<LevelDuration>> {
+        let mut raw = Self::raw_from_signal(decoded)?;
+        if !Self::frame_valid(&raw) {
+            return None;
+        }
+        // Flipper-ARF hop recompute when a known or saved key reproduces the captured hop;
+        // otherwise the captured frame is replayed unchanged. A frame in the FCA fobs' layout or
+        // the Maserati keys' HiTag2 frame is always replayed: the recompute's fields are the C's
+        // (and it would leave the HiTag2 frame's check as it was).
+        let own_layout = Self::fca_fields(&raw).is_some() || Self::hitag2_fields(&raw).is_some();
+        if let Some((key, combo)) = Self::find_key(&raw).filter(|_| !own_layout) {
+            let selector = match button {
+                0x01 => SEL_LOCK,
+                0x02 => SEL_UNLOCK,
+                0x04 => SEL_TRUNK,
+                _ => (raw[7] >> BTN_SHIFT) & 0x03,
+            };
+            let counter = u32::from(decoded.counter.unwrap_or_else(|| Self::counter(&raw))) + 1;
+            Self::patch_button(&mut raw, selector);
+            Self::patch_counter(&mut raw, counter);
+            let hop = Self::compute_hop(&raw, &key, combo);
+            Self::patch_hop(&mut raw, hop);
+        }
+        let mut signal = Vec::with_capacity(ENC_REPEAT * (WIRE_BITS * 2 + 3));
+        for _ in 0..ENC_REPEAT {
+            Self::append_frame(&mut signal, &raw);
+        }
+        Some(signal)
+    }
 
     /// `subghz_protocol_decoder_fiat_v2_deserialize`: Bit 112 and a valid Raw frame.
-    fn from_flipper_key(&self, key: &FlipperKey) -> Option<DecodedSignal> { None }
+    fn from_flipper_key(&self, key: &FlipperKey) -> Option<DecodedSignal> {
+        if key.bits != WIRE_BITS {
+            return None;
+        }
+        let raw = <[u8; WIRE_BYTES]>::try_from(key.hex_bytes_field("Raw")?).ok()?;
+        Self::frame_valid(&raw).then(|| Self::build_signal(&raw))
+    }
 
     /// `subghz_protocol_decoder_fiat_v2_serialize` (see the module doc).
-    fn to_flipper_key(&self, decoded: &DecodedSignal) -> Option<FlipperKey> { None }
+    fn to_flipper_key(&self, decoded: &DecodedSignal) -> Option<FlipperKey> {
+        let raw = Self::raw_from_signal(decoded)?;
+        if !Self::frame_valid(&raw) {
+            return None;
+        }
+        let (uid, hop) = (Self::uid(&raw), Self::hop(&raw));
+        let mut key = FlipperKey::for_protocol("Fiat V2", WIRE_BITS, (u64::from(uid) << 32) | u64::from(hop));
+        key.push_u32("Serial", uid);
+        key.push_u32("Btn", raw[7].into());
+        key.push_u32("Cnt", Self::counter(&raw).into());
+        key.push_u32("Hop", hop);
+        key.push_hex_bytes("Raw", &raw);
+        Some(key)
+    }
 }
 
 impl Default for FiatV2Decoder {

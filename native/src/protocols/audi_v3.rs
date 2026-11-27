@@ -328,12 +328,17 @@ impl ProtocolDecoder for AudiV3Decoder {
         None
     }
 
-    fn supports_encoding(&self) -> bool { false }
+    fn supports_encoding(&self) -> bool {
+        true
+    }
 
     /// Make the next press of a BCM2 frame's key for `button` (a KAT generic code), using the car's
     /// loaded key ([encode_frame]). None for the C's frames (encrypted hop, Replay only) and for a
     /// BCM2 frame whose car key is not loaded.
-    fn encode(&self, decoded: &DecodedSignal, button: u8) -> Option<Vec<LevelDuration>> { None }
+    fn encode(&self, decoded: &DecodedSignal, button: u8) -> Option<Vec<LevelDuration>> {
+        let bytes = bcm2_bytes_of(decoded)?;
+        encode_frame(&bytes, map_button(button, bytes[0] & 3))
+    }
 
     /// "Send next code": the captured button exactly (the Audi button codes overlap KAT's generic
     /// ones, so the default `encode` with the raw byte would remap them).
@@ -344,10 +349,27 @@ impl ProtocolDecoder for AudiV3Decoder {
 
     /// `subghz_protocol_decoder_audi_v3_deserialize`: `Bit: 96`, the key (`button << 56 | hop`) and
     /// the optional `Cnt` (24 bits) and `Chk` lines (0 when absent); no gate is applied.
-    fn from_flipper_key(&self, key: &FlipperKey) -> Option<DecodedSignal> { None }
+    fn from_flipper_key(&self, key: &FlipperKey) -> Option<DecodedSignal> {
+        if key.bits != DATA_BITS {
+            return None;
+        }
+        let cnt = key.u32_field("Cnt").unwrap_or(0) & 0xFF_FFFF;
+        let chk = key.u32_field("Chk").unwrap_or(0) as u8;
+        Some(signal(key.key, cnt, chk, bcm2_key_file(&pack(key.key, cnt, chk))))
+    }
 
     /// `subghz_protocol_decoder_audi_v3_serialize`: the generic Key, then `Btn`, `Cnt`, `Chk`.
-    fn to_flipper_key(&self, decoded: &DecodedSignal) -> Option<FlipperKey> { None }
+    fn to_flipper_key(&self, decoded: &DecodedSignal) -> Option<FlipperKey> {
+        if decoded.data_count_bit != DATA_BITS {
+            return None;
+        }
+        let extra = decoded.extra?;
+        let mut key = FlipperKey::for_protocol(NAME, DATA_BITS, decoded.data);
+        key.push_u32("Btn", u32::from(decoded.button?));
+        key.push_u32("Cnt", (extra >> 8) as u32 & 0xFF_FFFF);
+        key.push_u32("Chk", (extra & 0xFF) as u32);
+        Some(key)
+    }
 }
 
 /// The 12 bytes the C's fields hold: `data` (`button << 56 | hop`), the 24-bit counter, the check.

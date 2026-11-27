@@ -213,15 +213,34 @@ impl ProtocolDecoder for HondaV4Decoder {
         out
     }
 
-    fn supports_encoding(&self) -> bool { false }
+    fn supports_encoding(&self) -> bool {
+        false
+    }
 
-    fn encode(&self, _decoded: &DecodedSignal, _button: u8) -> Option<Vec<LevelDuration>> { None }
+    fn encode(&self, _decoded: &DecodedSignal, _button: u8) -> Option<Vec<LevelDuration>> {
+        None
+    }
 
     /// `subghz_protocol_decoder_honda_v4_deserialize`: the 51-bit key, re-checked.
-    fn from_flipper_key(&self, key: &FlipperKey) -> Option<DecodedSignal> { None }
+    fn from_flipper_key(&self, key: &FlipperKey) -> Option<DecodedSignal> {
+        if key.bits != BITS as usize {
+            return None;
+        }
+        let data = key.key_u64()?;
+        validate(data, BITS).then(|| fields(data))
+    }
 
     /// `subghz_protocol_decoder_honda_v4_serialize`.
-    fn to_flipper_key(&self, decoded: &DecodedSignal) -> Option<FlipperKey> { None }
+    fn to_flipper_key(&self, decoded: &DecodedSignal) -> Option<FlipperKey> {
+        if decoded.data_count_bit != BITS as usize {
+            return None;
+        }
+        let mut key = FlipperKey::for_protocol(NAME, BITS as usize, decoded.data);
+        key.push_u32("Serial", decoded.serial?);
+        key.push_u32("Btn", decoded.button?.into());
+        key.push_u32("Cnt", decoded.counter?.into());
+        Some(key)
+    }
 }
 
 #[cfg(test)]

@@ -417,16 +417,49 @@ impl ProtocolDecoder for CameAtomoDecoder {
         }
     }
 
-    fn supports_encoding(&self) -> bool { false }
+    fn supports_encoding(&self) -> bool {
+        true
+    }
 
-    fn encode(&self, decoded: &DecodedSignal, button: u8) -> Option<Vec<LevelDuration>> { None }
+    fn encode(&self, decoded: &DecodedSignal, button: u8) -> Option<Vec<LevelDuration>> {
+        if decoded.data_count_bit != MIN_COUNT_BIT as usize {
+            return None;
+        }
+        let f = fields(decoded.data);
+        let mode = (decoded.extra.unwrap_or(0) >> 8) as u8;
+        // A fresh encoder's `generic.btn` is 0 when the key's button code is unknown.
+        let btn = if (1..=6).contains(&button) { button } else { f.button.unwrap_or(0) };
+        Some(build_upload(next_counter(mode, f.counter), f.serial, code_from_button(btn)))
+    }
 
     /// The decoder's deserialize (`Bit` must be 62; `CounterMode`) + `get_string`.
-    fn from_flipper_key(&self, key: &FlipperKey) -> Option<DecodedSignal> { None }
+    fn from_flipper_key(&self, key: &FlipperKey) -> Option<DecodedSignal> {
+        if key.bits != MIN_COUNT_BIT as usize {
+            return None;
+        }
+        let mode = g6_common::counter_mode(key);
+        Some(Self::signal(key.key, (mode != 0).then_some(u64::from(mode) << 8), 0))
+    }
 
     /// The garage serialize (`Protocol`, `Bit`, `Key` = the received bits) + the key's
     /// `CounterMode`.
-    fn to_flipper_key(&self, decoded: &DecodedSignal) -> Option<FlipperKey> { None }
+    fn to_flipper_key(&self, decoded: &DecodedSignal) -> Option<FlipperKey> {
+        if decoded.data_count_bit != MIN_COUNT_BIT as usize {
+            return None;
+        }
+        let mut key = FlipperKey::new(
+            "CAME Atomo",
+            MIN_COUNT_BIT as usize,
+            decoded.data,
+            433_920_000,
+            "FuriHalSubGhzPresetOok650Async",
+        );
+        let mode = (decoded.extra.unwrap_or(0) >> 8) as u8;
+        if mode != 0 {
+            key.push("CounterMode", mode.to_string());
+        }
+        Some(key)
+    }
 }
 
 #[cfg(test)]

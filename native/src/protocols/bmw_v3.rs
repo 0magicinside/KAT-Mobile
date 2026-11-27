@@ -460,7 +460,9 @@ impl ProtocolDecoder for BmwV3Decoder {
 
     /// KAT can transmit this protocol, but only for a decode whose fob key is loaded
     /// (`encoder_capable`, set by [`cas3_enrich`]); without the key the frame is decode-only.
-    fn supports_encoding(&self) -> bool { false }
+    fn supports_encoding(&self) -> bool {
+        true
+    }
 
     /// Build this fob's next valid code: look up its CAS3 secrets by ID, take its stored (resynced)
     /// counter + 1, compute the HITAG2 authenticator, assemble `b1 ‖ id ‖ auth ‖ b8` with a fresh
@@ -468,14 +470,42 @@ impl ProtocolDecoder for BmwV3Decoder {
     /// captured frame (the button→nibble map is not yet verified), so this is "send next code" for
     /// the same press. Advances the stored counter so repeated sends keep moving forward. `None`
     /// unless the fob's key is loaded (so a decode without a key stays decode-only).
-    fn encode(&self, decoded: &DecodedSignal, _button: u8) -> Option<Vec<LevelDuration>> { None }
+    fn encode(&self, decoded: &DecodedSignal, _button: u8) -> Option<Vec<LevelDuration>> {
+        if decoded.data_count_bit != usize::from(DATA_BITS) {
+            return None;
+        }
+        let id = decoded.serial? as u16;
+        let fob = keys::get_keystore().bmw_cas3_fob(id)?;
+        let b1 = (decoded.data >> 56) as u8;
+        let counter = fob.counter.wrapping_add(1);
+        let (payload, b9) = frame_for_counter(id, fob.uid, &fob.key, counter, b1);
+        keys::get_keystore_mut().remember_bmw_cas3_counter(id, counter);
+        let bits = frame_bits(payload, b9);
+        Some(
+            std::iter::repeat_with(|| build_pulses(&bits))
+                .take(TX_COPIES)
+                .flatten()
+                .collect(),
+        )
+    }
 
     /// `subghz_protocol_decoder_bmw_v3_deserialize`: `Bit: 64` and the key; the fields are carved
     /// from it (the extra lines are not read, and the button whitelist is not applied).
-    fn from_flipper_key(&self, key: &FlipperKey) -> Option<DecodedSignal> { None }
+    fn from_flipper_key(&self, key: &FlipperKey) -> Option<DecodedSignal> {
+        (key.bits == usize::from(DATA_BITS)).then(|| signal(key.key))
+    }
 
     /// `subghz_protocol_decoder_bmw_v3_serialize`: the generic Key, then `Serial`, `Btn`, `Cnt`.
-    fn to_flipper_key(&self, decoded: &DecodedSignal) -> Option<FlipperKey> { None }
+    fn to_flipper_key(&self, decoded: &DecodedSignal) -> Option<FlipperKey> {
+        if decoded.data_count_bit != usize::from(DATA_BITS) {
+            return None;
+        }
+        let mut key = FlipperKey::for_protocol(NAME, usize::from(DATA_BITS), decoded.data);
+        key.push_u32("Serial", decoded.serial?);
+        key.push_u32("Btn", u32::from(decoded.button?));
+        key.push_u32("Cnt", u32::from(decoded.counter?));
+        Some(key)
+    }
 }
 
 /// Synthetic captures for the tests.

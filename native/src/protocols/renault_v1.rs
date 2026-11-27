@@ -775,9 +775,15 @@ impl ProtocolDecoder for RenaultV1Decoder {
         ready
     }
 
-    fn supports_encoding(&self) -> bool { false }
+    fn supports_encoding(&self) -> bool {
+        true
+    }
 
-    fn encode(&self, decoded: &DecodedSignal, button: u8) -> Option<Vec<LevelDuration>> { None }
+    fn encode(&self, decoded: &DecodedSignal, button: u8) -> Option<Vec<LevelDuration>> {
+        let raw = Self::payload_from_signal(decoded)?;
+        let (payload, shape) = Self::tx_payload(&raw, button);
+        Some(Self::build_upload(&payload, shape))
+    }
 
     /// Key files: ProtoPirate `subghz_protocol_decoder_renault_v1_deserialize`: Bit must be 88;
     /// Key (the C's 64-bit `generic.data`) and Key_2 (8 bytes, the 24-bit tail) rebuild the
@@ -787,14 +793,55 @@ impl ProtocolDecoder for RenaultV1Decoder {
     /// A "Hitag2 Key" line that fits the frame becomes the remote's saved key
     /// ([`Self::adopt_file_key`]). A `Bit: 82` key is Flipper-ARF's "Renault V1" (KAT's
     /// "Renault V1 (ARF)") and loads through that decoder.
-    fn from_flipper_key(&self, key: &FlipperKey) -> Option<DecodedSignal> { None }
+    fn from_flipper_key(&self, key: &FlipperKey) -> Option<DecodedSignal> {
+        if key.bits == 82 {
+            return super::renault_v1_arf::RenaultV1ArfDecoder::new().from_flipper_key(key);
+        }
+        if key.bits != 88 {
+            return None;
+        }
+        let k = key.key_u64()?;
+        let key_2 = (key.hex_field("Key_2")? & 0xFF_FFFF) as u32;
+        let raw = Self::payload(k, key_2);
+        if !Self::payload_valid(&raw) {
+            return None;
+        }
+        Self::adopt_file_key(key, &raw);
+        Some(Self::frame_signal(k, key_2, hitag2::renault_seed_recover(&raw)))
+    }
 
     /// Key files: ProtoPirate `subghz_protocol_decoder_renault_v1_serialize`: Protocol "Renault V1",
     /// Bit 88, Key, then Key_2 (8 bytes), Recovered (1 byte: 01 = seed recovered, 02 = brute force
     /// missed — KAT always runs it), Seed (4 bytes: the recovered IV, else 0), Serial, Btn, Cnt
     /// (16-bit with a recovered seed, else 10-bit) and Hop (decimal), as PP's file reads after its
     /// "Hitag2 BF"; then doctor-firmware's Hitag2 Key + Hitag2 Epoch when a saved key verifies.
-    fn to_flipper_key(&self, decoded: &DecodedSignal) -> Option<FlipperKey> { None }
+    fn to_flipper_key(&self, decoded: &DecodedSignal) -> Option<FlipperKey> {
+        let raw = Self::payload_from_signal(decoded)?;
+        let k = u64::from_be_bytes(raw[..8].try_into().ok()?);
+        let key_2 = u32::from_be_bytes([0, raw[8], raw[9], raw[10]]);
+        let iv = hitag2::renault_seed_recover(&raw);
+        let seed = iv.as_ref().map_or(0, hitag2::renault_seed_from_iv);
+        let counter = match iv {
+            Some(_) => hitag2::renault_counter_from_seed(seed),
+            None => Self::cnt10(&raw),
+        };
+        let mut key = FlipperKey::for_protocol("Renault V1", 88, k);
+        key.push_hex("Key_2", u64::from(key_2), 8);
+        key.push_hex("Recovered", if iv.is_some() { 1 } else { 2 }, 1);
+        key.push_hex("Seed", u64::from(seed), 4);
+        key.push_u32("Serial", (k >> 32) as u32);
+        key.push_u32("Btn", u32::from(raw[4] >> 4));
+        key.push_u32("Cnt", counter.into());
+        key.push_u32("Hop", Self::hop(&raw));
+        // doctor-firmware's lines for a key it verified (`HITAG2_HELL_KEY_FIELD`, standard order).
+        if iv.is_none() {
+            if let Some((hitag2_key, epoch)) = Self::saved_key(&raw) {
+                key.push_hex_bytes("Hitag2 Key", &hitag2_key);
+                key.push_u32("Hitag2 Epoch", epoch);
+            }
+        }
+        Some(key)
+    }
 }
 
 impl Default for RenaultV1Decoder {

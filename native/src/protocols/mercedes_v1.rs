@@ -550,15 +550,68 @@ impl ProtocolDecoder for MercedesV1Decoder {
         None
     }
 
-    fn supports_encoding(&self) -> bool { false }
+    fn supports_encoding(&self) -> bool {
+        true
+    }
 
-    fn encode(&self, decoded: &DecodedSignal, button: u8) -> Option<Vec<LevelDuration>> { None }
+    fn encode(&self, decoded: &DecodedSignal, button: u8) -> Option<Vec<LevelDuration>> {
+        if decoded.data_count_bit != PAYLOAD_BITS as usize {
+            return None;
+        }
+        let mut hi = decoded.data;
+        let mut lo = (decoded.extra? << 6) & LO_INVERT_MASK;
+
+        let f = parse_fields(hi, lo);
+        let btn = Self::map_button(button, f.btn);
+        if btn != f.btn {
+            rebuild_payload(&mut hi, &mut lo, btn, f.repeat_flag, f.cnt);
+        }
+
+        let burst_len = 2 * (PREAMBLE_TX_BITS + PAYLOAD_BITS as usize) + 1;
+        let mut signal = Vec::with_capacity(burst_len * REPEAT_DEFAULT);
+        for _ in 0..REPEAT_DEFAULT {
+            Self::enc_burst(&mut signal, hi, lo);
+            Self::enc_add_level(&mut signal, false, REPEAT_GAP_US);
+        }
+        Some(signal)
+    }
 
     /// `subghz_protocol_decoder_mercedes_v1_deserialize` (see the module doc, "Key files").
-    fn from_flipper_key(&self, key: &FlipperKey) -> Option<DecodedSignal> { None }
+    fn from_flipper_key(&self, key: &FlipperKey) -> Option<DecodedSignal> {
+        if key.bits != PAYLOAD_BITS as usize {
+            return None;
+        }
+        let hi = key.key_u64()?;
+        let lo = key.hex_field("Key_2").or_else(|| key.hex_field("Key2")).unwrap_or(0);
+        Some(frame_signal(hi, lo & LO_INVERT_MASK))
+    }
 
     /// doctor-firmware's `subghz_block_generic_serialize` of the decode (see "Key files").
-    fn to_flipper_key(&self, decoded: &DecodedSignal) -> Option<FlipperKey> { None }
+    fn to_flipper_key(&self, decoded: &DecodedSignal) -> Option<FlipperKey> {
+        if decoded.data_count_bit != PAYLOAD_BITS as usize {
+            return None;
+        }
+        let hi = decoded.data;
+        let lo = (decoded.extra? << 6) & LO_INVERT_MASK;
+        let f = parse_fields(hi, lo);
+        let mut key = FlipperKey::for_protocol("Mercedes V1", PAYLOAD_BITS as usize, hi);
+        if f.serial != 0 || f.btn != 0 || f.cnt != 0 {
+            key.push_u32("Serial", f.serial);
+            key.push_u32("Btn", f.btn.into());
+            key.push_u32("Cnt", f.cnt);
+        }
+        key.push_u32("TE", TE_US);
+        if f.repeat_flag != 0 {
+            key.push_u32("Extra", f.repeat_flag.into());
+        }
+        if lo != 0 {
+            key.push_hex("Key_2", lo, 8);
+        }
+        if f.hop != 0 {
+            key.push_hex("Key_3", f.hop, 8);
+        }
+        Some(key)
+    }
 }
 
 impl Default for MercedesV1Decoder {

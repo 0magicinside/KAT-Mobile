@@ -369,13 +369,46 @@ impl ProtocolDecoder for SecPlusV1Decoder {
         None
     }
 
-    fn supports_encoding(&self) -> bool { false }
+    fn supports_encoding(&self) -> bool {
+        true
+    }
 
-    fn encode(&self, decoded: &DecodedSignal, button: u8) -> Option<Vec<LevelDuration>> { None }
+    fn encode(&self, decoded: &DecodedSignal, button: u8) -> Option<Vec<LevelDuration>> {
+        if decoded.data_count_bit != BIT_COUNT {
+            return None;
+        }
+        let mut fixed = (decoded.data >> 32) as u32;
+        // Flipper-ARF lib's D-pad: replace the lowest base-3 digit (the button).
+        if button <= 2 {
+            fixed = fixed - fixed % 3 + button as u32;
+        }
+        let rolling = next_rolling(decoded.data as u32);
+        if fixed > FIXED_MAX {
+            return None;
+        }
+        let data_array = encode_symbols(fixed, rolling);
+        let mut out = Vec::with_capacity(TX_REPEAT * 84);
+        for _ in 0..TX_REPEAT {
+            push_upload(&mut out, &data_array);
+        }
+        Some(out)
+    }
 
-    fn from_flipper_key(&self, key: &FlipperKey) -> Option<DecodedSignal> { None }
+    fn from_flipper_key(&self, key: &FlipperKey) -> Option<DecodedSignal> {
+        (key.bits == BIT_COUNT).then(|| decoded_from_data(key.key))
+    }
 
-    fn to_flipper_key(&self, decoded: &DecodedSignal) -> Option<FlipperKey> { None }
+    fn to_flipper_key(&self, decoded: &DecodedSignal) -> Option<FlipperKey> {
+        (decoded.data_count_bit == BIT_COUNT).then(|| {
+            FlipperKey::new(
+                NAME,
+                BIT_COUNT,
+                decoded.data,
+                0,
+                "FuriHalSubGhzPresetOok650Async",
+            )
+        })
+    }
 }
 
 #[cfg(test)]

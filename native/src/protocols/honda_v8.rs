@@ -273,16 +273,40 @@ impl ProtocolDecoder for HondaV8Decoder {
         }
     }
 
-    fn supports_encoding(&self) -> bool { false }
+    fn supports_encoding(&self) -> bool {
+        false
+    }
 
-    fn encode(&self, _decoded: &DecodedSignal, _button: u8) -> Option<Vec<LevelDuration>> { None }
+    fn encode(&self, _decoded: &DecodedSignal, _button: u8) -> Option<Vec<LevelDuration>> {
+        None
+    }
 
     /// `subghz_protocol_decoder_honda_v8_deserialize`: the key match is re-run; a key that no
     /// Honda key decrypts is not loaded.
-    fn from_flipper_key(&self, key: &FlipperKey) -> Option<DecodedSignal> { None }
+    fn from_flipper_key(&self, key: &FlipperKey) -> Option<DecodedSignal> {
+        if key.bits != usize::from(FRAME_BITS) {
+            return None;
+        }
+        let raw = key.key_u64()?;
+        let serial = ((raw >> 32) & 0x0FFF_FFFF) as u32;
+        let btn = ((raw >> 60) & 0x0F) as u8;
+        let (ki, _, rc) = find_key(raw as u32, serial, btn)?;
+        Some(fields(raw, ki, rc))
+    }
 
     /// `subghz_protocol_decoder_honda_v8_serialize`.
-    fn to_flipper_key(&self, decoded: &DecodedSignal) -> Option<FlipperKey> { None }
+    fn to_flipper_key(&self, decoded: &DecodedSignal) -> Option<FlipperKey> {
+        if decoded.data_count_bit != usize::from(FRAME_BITS) {
+            return None;
+        }
+        let mut key = FlipperKey::for_protocol(NAME, usize::from(FRAME_BITS), decoded.data);
+        key.push_u32("Serial", decoded.serial?);
+        key.push_u32("Btn", decoded.button?.into());
+        key.push_u32("Cnt", decoded.counter?.into());
+        key.push_u32("KeyIdx", decoded.extra? as u32);
+        key.push_u32("Enc", decoded.data as u32);
+        Some(key)
+    }
 }
 
 #[cfg(test)]

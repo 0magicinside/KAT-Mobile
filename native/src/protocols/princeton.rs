@@ -293,13 +293,43 @@ impl ProtocolDecoder for PrincetonDecoder {
         None
     }
 
-    fn supports_encoding(&self) -> bool { false }
+    fn supports_encoding(&self) -> bool {
+        true
+    }
 
-    fn encode(&self, decoded: &DecodedSignal, button: u8) -> Option<Vec<LevelDuration>> { None }
+    fn encode(&self, decoded: &DecodedSignal, button: u8) -> Option<Vec<LevelDuration>> {
+        if decoded.data_count_bit != MIN_COUNT_BIT {
+            return None;
+        }
+        let extra = decoded.extra?;
+        let te = extra as u32;
+        if te == 0 {
+            return None;
+        }
+        let guard_time = sanitize_guard_time((extra >> 32) as u32);
+        let (serial, captured) = check_remote_controller(decoded.data);
+        let data = build_key(serial, pick_button(captured, button));
+        Some(with_repeats(&build_frame(data, te, guard_time), TX_REPEAT))
+    }
 
-    fn from_flipper_key(&self, key: &FlipperKey) -> Option<DecodedSignal> { None }
+    fn from_flipper_key(&self, key: &FlipperKey) -> Option<DecodedSignal> {
+        let (bits, data) = generic_fields(key);
+        if bits != MIN_COUNT_BIT {
+            return None;
+        }
+        let te = u32_line(key, "TE")?;
+        let guard_time =
+            u32_line(key, "Guard_time").map_or(GUARD_TIME_DEFAULT, sanitize_guard_time);
+        Some(decoded(data, te, guard_time))
+    }
 
-    fn to_flipper_key(&self, d: &DecodedSignal) -> Option<FlipperKey> { None }
+    fn to_flipper_key(&self, d: &DecodedSignal) -> Option<FlipperKey> {
+        let extra = d.extra?;
+        let mut key = generic_key(NAME, d);
+        key.push("TE", (extra as u32).to_string());
+        key.push("Guard_time", ((extra >> 32) as u32).to_string());
+        Some(key)
+    }
 }
 
 #[cfg(test)]

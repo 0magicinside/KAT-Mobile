@@ -292,9 +292,25 @@ impl ProtocolDecoder for MitsubishiV0Decoder {
         None
     }
 
-    fn supports_encoding(&self) -> bool { false }
+    fn supports_encoding(&self) -> bool {
+        true
+    }
 
-    fn encode(&self, decoded: &DecodedSignal, button: u8) -> Option<Vec<LevelDuration>> { None }
+    fn encode(&self, decoded: &DecodedSignal, button: u8) -> Option<Vec<LevelDuration>> {
+        if decoded.data_count_bit == kia_v0::BIT_COUNT_KIA {
+            // ProtoPirate's Mitsubishi V0 (a Kia V0 frame type).
+            return kia_v0::encode_type(decoded, kia_v0::Request::Button(button), KiaV0Type::Mitsubishi);
+        }
+        if decoded.data_count_bit != BIT_COUNT {
+            return None;
+        }
+        let payload = match decoded.extra {
+            Some(extra) => raw_frame(decoded.data, extra),
+            None => fallback_frame(decoded.serial?, decoded.counter?, decoded.button.unwrap_or(0)),
+        };
+        let one = upload(&payload);
+        Some(one.iter().cycle().take(one.len() * TX_REPEAT).cloned().collect())
+    }
 
     /// "Send next code": the 61-bit format through Kia V0's (the captured button); the 96-bit one
     /// is a replay of the captured button anyway.
@@ -312,14 +328,57 @@ impl ProtocolDecoder for MitsubishiV0Decoder {
     /// has — its own 96-bit files only load into its encoder — so KAT follows the encoder.) Any
     /// other bit count is ProtoPirate's Mitsubishi V0, a Kia V0 frame type: handed to Kia V0, as
     /// ProtoPirate's catalog loads a "Mitsubishi V0" key.
-    fn from_flipper_key(&self, key: &super::FlipperKey) -> Option<DecodedSignal> { None }
+    fn from_flipper_key(&self, key: &super::FlipperKey) -> Option<DecodedSignal> {
+        if key.bits != BIT_COUNT {
+            return kia_v0::KiaV0Decoder::new().from_flipper_key(key);
+        }
+        key.key_u64()?;
+        let raw: [u8; DATA_BYTES] = match key.hex_bytes_field("Raw_Frame") {
+            Some(raw) => raw.try_into().ok()?,
+            None => fallback_frame(
+                key.u32_field("Serial").unwrap_or(0),
+                key.u32_field("Cnt").unwrap_or(0) as u16,
+                key.u32_field("Btn").unwrap_or(0) as u8,
+            ),
+        };
+        let mut decoder = MitsubishiV0Decoder::new();
+        decoder.decode_data = raw;
+        Some(decoder.publish_frame())
+    }
 
     /// Key files, 96-bit format (Flipper-ARF `subghz_protocol_decoder_mitsubishi_v0_serialize`):
     /// `Protocol: Mitsubishi V0`, `Bit: 96`, `Key` all zero (ARF's decoder never sets
     /// `generic.data`), then `Serial`, `Cnt`, `Btn` (the unscrambled fields) and `Raw_Frame`. A
     /// 61-bit (ProtoPirate) Mitsubishi V0 is written by Kia V0, as ProtoPirate does: `Protocol: Kia
     /// V0` with `Type: 4`.
-    fn to_flipper_key(&self, decoded: &DecodedSignal) -> Option<super::FlipperKey> { None }
+    fn to_flipper_key(&self, decoded: &DecodedSignal) -> Option<super::FlipperKey> {
+        if decoded.data_count_bit == kia_v0::BIT_COUNT_KIA {
+            let mitsubishi = DecodedSignal {
+                protocol_display_name: Some(KiaV0Type::Mitsubishi.display_name().to_string()),
+                ..decoded.clone()
+            };
+            return kia_v0::KiaV0Decoder::new().to_flipper_key(&mitsubishi);
+        }
+        if decoded.data_count_bit != BIT_COUNT {
+            return None;
+        }
+        let (serial, counter, button, raw) = match decoded.extra {
+            Some(extra) => {
+                let raw = raw_frame(decoded.data, extra);
+                let (serial, counter, button) = unscramble(&raw);
+                (serial, counter, button, Some(raw))
+            }
+            None => (decoded.serial?, decoded.counter?, decoded.button.unwrap_or(0), None),
+        };
+        let mut key = super::FlipperKey::for_protocol("Mitsubishi V0", BIT_COUNT, 0);
+        key.push_u32("Serial", serial);
+        key.push_u32("Cnt", counter.into());
+        key.push_u32("Btn", button.into());
+        if let Some(raw) = raw {
+            key.push_hex_bytes("Raw_Frame", &raw);
+        }
+        Some(key)
+    }
 }
 
 impl Default for MitsubishiV0Decoder {

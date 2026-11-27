@@ -688,9 +688,29 @@ impl ProtocolDecoder for KiaV6Decoder {
         None
     }
 
-    fn supports_encoding(&self) -> bool { false }
+    fn supports_encoding(&self) -> bool {
+        true
+    }
 
-    fn encode(&self, decoded: &DecodedSignal, button: u8) -> Option<Vec<LevelDuration>> { None }
+    fn encode(&self, decoded: &DecodedSignal, button: u8) -> Option<Vec<LevelDuration>> {
+        let serial = decoded.serial?;
+        let extra = decoded.extra.unwrap_or(0);
+        let fx_field = extra as u8;
+        let counter = ((((extra >> 8) & 0xFFFF) as u32) << 16 | decoded.counter.unwrap_or(0) as u32)
+            .wrapping_add(1);
+        let button = match button {
+            0x01 => 0x1,
+            0x02 => 0x2,
+            0x04 => 0x3,
+            0x08 => 0x4,
+            _ => decoded.button.unwrap_or(0),
+        };
+
+        let (p1_lo, p1_hi, p2_lo, p2_hi, p3) =
+            Self::encrypt_payload(fx_field, serial, button, counter);
+
+        Some(Self::build_upload(p1_lo, p1_hi, p2_lo, p2_hi, p3))
+    }
 
     /// Key files: `kia_protocol_decoder_v6_deserialize` (Bit 144; Key = part 1, Key_2 = part 2's
     /// low half, Key_3 its high half, Key_4 = part 3, decimal) and the older Flipper-ARF layout of
@@ -698,7 +718,41 @@ impl ProtocolDecoder for KiaV6Decoder {
     /// cannot read); the parts are decrypted as the decoder does. ProtoPirate's encoder transmits
     /// from Serial/Btn/Cnt/Fx (re-encrypting them): when those differ from the decrypted fields,
     /// KAT rebuilds the frame from them the same way.
-    fn from_flipper_key(&self, key: &FlipperKey) -> Option<DecodedSignal> { None }
+    fn from_flipper_key(&self, key: &FlipperKey) -> Option<DecodedSignal> {
+        if key.bits != MIN_COUNT_BIT {
+            return None;
+        }
+        let p1 = key.key_u64()?;
+        let (p2, p3) = match key.field("Key_2") {
+            Some(v) if v.split_whitespace().count() > 1 => {
+                (key.hex_field("Key_2")?, key.hex_field("Key_3").unwrap_or(0) as u16)
+            }
+            _ => {
+                let lo = key.u32_field("Key_2").unwrap_or(0) as u64;
+                let hi = key.u32_field("Key_3").unwrap_or(0) as u64;
+                (hi << 32 | lo, key.u32_field("Key_4").unwrap_or(0) as u16)
+            }
+        };
+        let d = frame_signal(p1, p2, p3);
+        let (serial, button, counter, fx) =
+            (key.u32_field("Serial"), key.u32_field("Btn"), key.u32_field("Cnt"), key.u32_field("Fx"));
+        if serial.is_none() && button.is_none() && counter.is_none() && fx.is_none() {
+            return Some(d);
+        }
+        let extra = d.extra?;
+        let now = (d.serial?, d.button?, (((extra >> 8) & 0xFFFF) as u32) << 16 | d.counter? as u32, extra as u8);
+        let want = (
+            serial.map_or(now.0, |s| s & 0x00FF_FFFF),
+            button.map_or(now.1, |b| b as u8),
+            counter.unwrap_or(now.2),
+            fx.map_or(now.3, |f| f as u8),
+        );
+        if want == now {
+            return Some(d);
+        }
+        let (lo1, hi1, lo2, hi2, part3) = Self::encrypt_payload(want.3, want.0, want.1 & 0x0F, want.2);
+        Some(frame_signal((hi1 as u64) << 32 | lo1 as u64, (hi2 as u64) << 32 | lo2 as u64, part3))
+    }
 
     /// Key files: `kia_protocol_decoder_v6_serialize` — "Kia V6", Bit 144, Key = part 1, then
     /// Serial (24 bit), Btn, Cnt (32 bit), Key_2 / Key_3 = part 2's low / high half, Key_4 = part 3,
@@ -707,7 +761,38 @@ impl ProtocolDecoder for KiaV6Decoder {
     /// module docs). None when that does not reproduce part 1's cipher bytes (a frame whose other
     /// plaintext bytes are not what the encoder builds). The Key is one 16-digit word, as the C
     /// writes it (ProtoPirate's and doctor-firmware's loaders also read spaced bytes).
-    fn to_flipper_key(&self, decoded: &DecodedSignal) -> Option<FlipperKey> { None }
+    fn to_flipper_key(&self, decoded: &DecodedSignal) -> Option<FlipperKey> {
+        if decoded.data_count_bit != MIN_COUNT_BIT {
+            return None;
+        }
+        let extra = decoded.extra?;
+        let counter = (((extra >> 8) & 0xFFFF) as u32) << 16 | decoded.counter? as u32;
+        let (serial, button) = (decoded.serial?, decoded.button?);
+        let mut plain = [0u8; 16];
+        plain[0] = extra as u8 ^ (extra >> 24) as u8;
+        plain[4..7].copy_from_slice(&serial.to_be_bytes()[1..]);
+        plain[7] = button;
+        plain[8..12].copy_from_slice(&counter.to_be_bytes());
+        plain[12] = AES_SBOX[(counter & 0xFF) as usize];
+        plain[15] = Self::crc8(&plain[..15], 0xFF, 0x07) ^ (extra >> 32) as u8;
+        let expanded_key = Self::aes_key_expansion(&Self::get_aes_key());
+        Self::aes128_encrypt(&expanded_key, &mut plain);
+        if plain[..6] != decoded.data.to_be_bytes()[2..] {
+            return None;
+        }
+        let part2 = u64::from_be_bytes(plain[6..14].try_into().unwrap());
+        let part3 = u16::from_be_bytes([plain[14], plain[15]]);
+        let mut key = FlipperKey::for_protocol("Kia V6", MIN_COUNT_BIT, decoded.data);
+        key.key_word = true;
+        key.push_u32("Serial", serial);
+        key.push_u32("Btn", button.into());
+        key.push_u32("Cnt", counter);
+        key.push_u32("Key_2", part2 as u32);
+        key.push_u32("Key_3", (part2 >> 32) as u32);
+        key.push_u32("Key_4", part3.into());
+        key.push_u32("Fx", extra as u8 as u32);
+        Some(key)
+    }
 }
 
 /// The Fx field carried in part 1's header nibbles (`kia_v6_decrypt`).

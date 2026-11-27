@@ -564,17 +564,59 @@ impl ProtocolDecoder for NiceFlorSDecoder {
         None
     }
 
-    fn supports_encoding(&self) -> bool { false }
+    fn supports_encoding(&self) -> bool {
+        self.table.is_some()
+    }
 
-    fn encode(&self, decoded: &DecodedSignal, button: u8) -> Option<Vec<LevelDuration>> { None }
+    fn encode(&self, decoded: &DecodedSignal, button: u8) -> Option<Vec<LevelDuration>> {
+        let table = self.table.as_ref()?;
+        let frame = Frame::from_decoded(decoded)?;
+        let fields = frame.fields(Some(table))?;
+        Some(frame.upload(|plain, ic| encrypt_ic(plain, ic, table), fields, button))
+    }
 
     /// The garage decoder's deserialize (`Bit` 52 or 72, `Data` for 72, `CounterMode`) + doctor's
     /// `IC`, then the fields as `get_string` shows them.
-    fn from_flipper_key(&self, key: &FlipperKey) -> Option<DecodedSignal> { None }
+    fn from_flipper_key(&self, key: &FlipperKey) -> Option<DecodedSignal> {
+        let bits = match key.bits {
+            52 => MIN_COUNT_BIT,
+            72 => NICE_ONE_COUNT_BIT,
+            _ => return None,
+        };
+        let tail = if bits == NICE_ONE_COUNT_BIT { key.u32_field("Data")? & 0xF_FFFF } else { 0 };
+        let ic = match key.field("IC") {
+            Some(v) => match super::flipper_key::parse_hex_vec(v)?.as_slice() {
+                [hi, lo] => Some(u16::from_be_bytes([*hi, *lo])),
+                _ => return None,
+            },
+            None => None,
+        };
+        let frame = Frame { key: key.key, tail, bits, counter_mode: g6_common::counter_mode(key), ic };
+        Some(frame.to_decoded(self.table.as_ref()))
+    }
 
     /// The garage serialize: `Protocol`, `Bit`, `Key` (the 52-bit frame), Nice One's `Data` (the
     /// 20-bit tail), then doctor's `IC` and the `CounterMode` the key came with.
-    fn to_flipper_key(&self, decoded: &DecodedSignal) -> Option<FlipperKey> { None }
+    fn to_flipper_key(&self, decoded: &DecodedSignal) -> Option<FlipperKey> {
+        let frame = Frame::from_decoded(decoded)?;
+        let mut key = FlipperKey::new(
+            "Nice FloR-S",
+            frame.bits as usize,
+            frame.key,
+            433_920_000,
+            "FuriHalSubGhzPresetOok650Async",
+        );
+        if frame.bits == NICE_ONE_COUNT_BIT {
+            key.push("Data", frame.tail.to_string());
+        }
+        if let Some(ic) = frame.ic {
+            key.push_hex("IC", u64::from(ic), 2);
+        }
+        if frame.counter_mode != 0 {
+            key.push("CounterMode", frame.counter_mode.to_string());
+        }
+        Some(key)
+    }
 }
 
 #[cfg(test)]

@@ -198,13 +198,40 @@ impl ProtocolDecoder for PowerSmartDecoder {
         None
     }
 
-    fn supports_encoding(&self) -> bool { false }
+    fn supports_encoding(&self) -> bool {
+        true
+    }
 
-    fn encode(&self, decoded: &DecodedSignal, _button: u8) -> Option<Vec<LevelDuration>> { None }
+    fn encode(&self, decoded: &DecodedSignal, _button: u8) -> Option<Vec<LevelDuration>> {
+        (decoded.data_count_bit == BIT_COUNT).then(|| repeat_upload(&upload(decoded.data), REPEAT))
+    }
 
-    fn from_flipper_key(&self, key: &FlipperKey) -> Option<DecodedSignal> { None }
+    fn from_flipper_key(&self, key: &FlipperKey) -> Option<DecodedSignal> {
+        // subghz_block_generic_deserialize_check_count_bit(.., 64); the C decodes the fields
+        // from Key (the Serial/Btn/Cnt lines are informational).
+        (key.bits == BIT_COUNT).then(|| signal(key.key))
+    }
 
-    fn to_flipper_key(&self, decoded: &DecodedSignal) -> Option<FlipperKey> { None }
+    fn to_flipper_key(&self, decoded: &DecodedSignal) -> Option<FlipperKey> {
+        if decoded.data_count_bit != BIT_COUNT {
+            return None;
+        }
+        let mut k = FlipperKey::new(
+            "Power Smart",
+            BIT_COUNT,
+            decoded.data,
+            433_920_000,
+            "FuriHalSubGhzPresetOok650Async",
+        );
+        // doctor-firmware subghz_block_generic_write_optional_fields.
+        let (button, serial, channel) = fields(decoded.data);
+        if serial != 0 || button != 0 || channel != 0 {
+            k.push("Serial", serial.to_string());
+            k.push("Btn", button.to_string());
+            k.push("Cnt", channel.to_string());
+        }
+        Some(k)
+    }
 }
 
 #[cfg(test)]

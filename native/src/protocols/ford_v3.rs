@@ -464,15 +464,59 @@ impl ProtocolDecoder for FordV3Decoder {
         us.or(eu)
     }
 
-    fn supports_encoding(&self) -> bool { false }
+    fn supports_encoding(&self) -> bool {
+        false
+    }
 
-    fn encode(&self, _decoded: &DecodedSignal, _button: u8) -> Option<Vec<LevelDuration>> { None }
+    fn encode(&self, _decoded: &DecodedSignal, _button: u8) -> Option<Vec<LevelDuration>> {
+        None
+    }
 
     /// `subghz_protocol_decoder_ford_v3_deserialize` (see the module doc, "Key files").
-    fn from_flipper_key(&self, key: &FlipperKey) -> Option<DecodedSignal> { None }
+    fn from_flipper_key(&self, key: &FlipperKey) -> Option<DecodedSignal> {
+        if key.bits != DATA_BITS {
+            return None;
+        }
+        let mut raw = [0u8; DATA_BYTES];
+        raw[..8].copy_from_slice(&key.key_u64()?.to_be_bytes());
+        // `flipper_format_read_hex(.., "Raw", raw, 13)`: the first 13 values (a longer line loads too).
+        if let Some(full) = key.hex_bytes_field("Raw").filter(|r| r.len() >= DATA_BYTES) {
+            raw.copy_from_slice(&full[..DATA_BYTES]);
+        }
+        let variant = match key.u32_field("Variant") {
+            Some(0) => Variant::Eu,
+            Some(1) => Variant::Us,
+            _ if Self::c_cell_frame_valid(&raw) => Variant::Us,
+            _ => Variant::Eu,
+        };
+        Some(Self::build_signal(&raw, variant))
+    }
 
     /// `subghz_protocol_decoder_ford_v3_serialize` (see the module doc, "Key files").
-    fn to_flipper_key(&self, decoded: &DecodedSignal) -> Option<FlipperKey> { None }
+    fn to_flipper_key(&self, decoded: &DecodedSignal) -> Option<FlipperKey> {
+        let extra = decoded.extra?;
+        if decoded.data_count_bit != DATA_BITS || extra >> 40 != 0 {
+            return None;
+        }
+        let mut raw = [0u8; DATA_BYTES];
+        raw[..8].copy_from_slice(&decoded.data.to_be_bytes());
+        raw[8..].copy_from_slice(&extra.to_be_bytes()[3..]);
+        let variant = [Variant::Us, Variant::Eu]
+            .into_iter()
+            .find(|&v| {
+                let s = Self::build_signal(&raw, v);
+                (s.button, s.counter) == (decoded.button, decoded.counter)
+            })
+            .unwrap_or(if Self::c_cell_frame_valid(&raw) { Variant::Us } else { Variant::Eu });
+        let s = Self::build_signal(&raw, variant);
+        let mut key = FlipperKey::for_protocol("Ford V3", DATA_BITS, decoded.data);
+        key.push_hex_bytes("Raw", &raw);
+        key.push_u32("Serial", s.serial?);
+        key.push_u32("Btn", s.button?.into());
+        key.push_u32("Cnt", s.counter?.into());
+        key.push_u32("Variant", if variant == Variant::Us { 1 } else { 0 });
+        Some(key)
+    }
 }
 
 impl Default for FordV3Decoder {

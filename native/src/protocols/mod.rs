@@ -22,7 +22,7 @@
 
 mod common;
 /// "Add Manually": new gate / garage remotes of a chosen type (Flipper-ARF / doctor-firmware).
-// Remote generation excluded from Android RX.
+pub mod add_manually;
 pub mod flipper_key;
 /// Native buttons of the gate / garage remotes ("Send button…", button labels).
 pub mod gate_buttons;
@@ -232,7 +232,7 @@ mod mazda_v1;
 mod nissan_v0;
 // Toyota (FoxFW): FoxFW's "Toyota", Flipper-ARF's retired KeeLoq Toyota (decode-only).
 mod toyota_foxfw;
-// Transmit wrapper excluded from Android RX.
+mod tx_copies;
 mod stream_locator;
 #[cfg(test)]
 mod dd_testutil;
@@ -304,7 +304,7 @@ mod mazda_infinity;
 pub use common::DecodedSignal;
 pub use rtl433::{is_keeloq_chip, redecode_keeloq_chip};
 pub use flipper_key::FlipperKey;
-// No transmit wrapper exports.
+pub use tx_copies::transmission;
 pub use stream_locator::{LocatedFrame, StreamLocator};
 pub use info::{has_checksum_for, lookup as protocol_info, ProtocolInfo};
 /// PSA TEA key recovery for the signal menu's "Recover key" action (ProtoPirate's brute force,
@@ -434,7 +434,9 @@ pub trait ProtocolDecoder: Send + Sync {
     /// The decode of the frame `encode(decoded, button)` sends, for an encoder whose upload its
     /// own decoder cannot always read back. After a transmission the app keeps the frame sent on
     /// the capture (`app/tx.rs`); None: the app decodes the upload instead.
-    fn sent_signal(&self, _decoded: &DecodedSignal, _button: u8) -> Option<DecodedSignal> { None }
+    fn sent_signal(&self, _decoded: &DecodedSignal, _button: u8) -> Option<DecodedSignal> {
+        None
+    }
 
     /// Whether `sent`, the frame this protocol's encoder made from `from`, is the remote's next
     /// press, which the app then keeps on the capture so that the press after sends the code after
@@ -449,13 +451,17 @@ pub trait ProtocolDecoder: Send + Sync {
     /// lines), as the reference's `deserialize` does. None when KAT cannot load this protocol's
     /// key files or the key does not validate.
     #[allow(clippy::wrong_self_convention)] // ~90 decoder impls plus callers; a rename would ripple
-    fn from_flipper_key(&self, _key: &FlipperKey) -> Option<DecodedSignal> { None }
+    fn from_flipper_key(&self, _key: &FlipperKey) -> Option<DecodedSignal> {
+        None
+    }
 
     /// The key file the reference's `serialize` writes for this decode (Protocol name as the
     /// reference spells it, Bit, Key and the protocol's own lines, in the reference's order), so a
     /// Flipper can load a KAT capture. `frequency`/`preset` are filled in by the caller. None when
     /// not supported. `from_flipper_key(to_flipper_key(d))` must give back `d`.
-    fn to_flipper_key(&self, _decoded: &DecodedSignal) -> Option<FlipperKey> { None }
+    fn to_flipper_key(&self, _decoded: &DecodedSignal) -> Option<FlipperKey> {
+        None
+    }
 
     /// Report the frames that only count once a key search decrypts them, under the protocol's
     /// `<name> [unchecked]` display name, instead of dropping them ([ProtocolRegistry::
@@ -466,12 +472,16 @@ pub trait ProtocolDecoder: Send + Sync {
     /// [DecodedSignal] (Urmet: up to 40 bytes and 192 gaps). The capture loaded from the file keeps
     /// these pulses, so Replay sends what the reference's encoder would. None for every other
     /// protocol (they encode from the decode).
-    fn key_file_pulses(&self, _key: &FlipperKey) -> Option<Vec<LevelDuration>> { None }
+    fn key_file_pulses(&self, _key: &FlipperKey) -> Option<Vec<LevelDuration>> {
+        None
+    }
 
     /// The key file of a capture whose frame does not fit [DecodedSignal] (Urmet), rebuilt from
     /// the capture's recorded pulses. None for every other protocol (they write
     /// [Self::to_flipper_key]).
-    fn key_file_from_pulses(&self, _pulses: &[LevelDuration]) -> Option<FlipperKey> { None }
+    fn key_file_from_pulses(&self, _pulses: &[LevelDuration]) -> Option<FlipperKey> {
+        None
+    }
 }
 
 /// Registry of all supported protocols

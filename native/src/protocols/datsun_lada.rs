@@ -556,15 +556,56 @@ impl ProtocolDecoder for DatsunLadaDecoder {
         (self.sync_run >= PREAMBLE_MIN_SHORTS || signal.crc_valid).then_some(signal)
     }
 
-    fn supports_encoding(&self) -> bool { false }
+    fn supports_encoding(&self) -> bool {
+        true
+    }
 
-    fn encode(&self, decoded: &DecodedSignal, button: u8) -> Option<Vec<LevelDuration>> { None }
+    fn encode(&self, decoded: &DecodedSignal, button: u8) -> Option<Vec<LevelDuration>> {
+        let raw = Self::frame_from_signal(decoded)?;
+        if !checksum(&raw) {
+            return None;
+        }
+        // No "Learned"/"Cnt" checkpoint in KAT: the C then requires learn() on the captured frame.
+        let (learnable, state) = learn(&raw);
+        if !learnable {
+            return None;
+        }
+        let selector = Self::selector_for(Self::map_button(button, raw[6] & 0xF0))?;
+        let counter = decoded
+            .counter
+            .map_or_else(|| counter_of(state), |c| c & COUNTER_MASK);
+        let counter = (counter + 1) & COUNTER_MASK;
+        let (air, tail_seed) = build(&raw, state, counter, selector);
+        let signal = transmit(&air, tail_seed, selector);
+        // C overflow check (cannot trigger: the largest possible upload is 3169 entries).
+        (signal.len() <= UPLOAD_CAPACITY).then_some(signal)
+    }
 
     /// `subghz_protocol_decoder_datsun_lada_deserialize` (`datsun_lada_read`; see "Key files").
-    fn from_flipper_key(&self, key: &FlipperKey) -> Option<DecodedSignal> { None }
+    fn from_flipper_key(&self, key: &FlipperKey) -> Option<DecodedSignal> {
+        if key.protocol != "Datsun Lada" || key.bits != FRAME_BITS {
+            return None;
+        }
+        key.key_u64()?;
+        let raw: Frame = key.hex_bytes_field("Raw")?.try_into().ok()?;
+        checksum(&raw).then(|| Self::signal_from_frame(&raw))
+    }
 
     /// `subghz_protocol_decoder_datsun_lada_serialize` (see the module doc, "Key files").
-    fn to_flipper_key(&self, decoded: &DecodedSignal) -> Option<FlipperKey> { None }
+    fn to_flipper_key(&self, decoded: &DecodedSignal) -> Option<FlipperKey> {
+        let raw = Self::frame_from_signal(decoded)?;
+        let serial = u32::from_be_bytes([raw[10], raw[9], raw[8], raw[7]]);
+        let button = u32::from(raw[6] & 0xF0);
+        let counter = u32::from(counter_of(learn(&raw).1));
+        let mut key = FlipperKey::for_protocol("Datsun Lada", FRAME_BITS, decoded.data);
+        if serial != 0 || button != 0 || counter != 0 {
+            key.push_u32("Serial", serial);
+            key.push_u32("Btn", button);
+            key.push_u32("Cnt", counter);
+        }
+        key.push_hex_bytes("Raw", &raw);
+        Some(key)
+    }
 }
 
 impl Default for DatsunLadaDecoder {

@@ -430,15 +430,61 @@ impl ProtocolDecoder for MazdaV0Decoder {
         None
     }
 
-    fn supports_encoding(&self) -> bool { false }
+    fn supports_encoding(&self) -> bool {
+        true
+    }
 
-    fn encode(&self, decoded: &DecodedSignal, button: u8) -> Option<Vec<LevelDuration>> { None }
+    fn encode(&self, decoded: &DecodedSignal, button: u8) -> Option<Vec<LevelDuration>> {
+        // subghz_block_generic_deserialize_check_count_bit: the key must be a 64-bit Mazda V0 key.
+        if decoded.data_count_bit != MIN_COUNT_BIT {
+            return None;
+        }
+        // mazda_v0_decode_key(Key), then the Serial/Btn/Cnt fields override it. KAT's counter is
+        // the low 16 bits of the 20-bit counter, so the top nibble comes from the key.
+        let (key_serial, key_button, key_counter) = Self::decode_key(decoded.data);
+        let serial = decoded.serial.unwrap_or(key_serial);
+        let captured_button = decoded.button.map(|b| b & 0x0F).unwrap_or(key_button);
+        let counter = match decoded.counter {
+            Some(low) => (key_counter & 0xF_0000) | low as u32,
+            None => key_counter,
+        };
+        let button = Self::map_button(button, captured_button);
+        // Fresh press: the emulate scene bumps the counter; the encoder masks it to 20 bits.
+        let counter = counter.wrapping_add(1) & COUNTER_MASK;
+        let key = Self::encode_key(serial, button, counter);
+        Some(Self::build_upload(key))
+    }
 
     /// `subghz_protocol_decoder_mazda_v0_deserialize` (see the module doc, "Key files").
-    fn from_flipper_key(&self, key: &FlipperKey) -> Option<DecodedSignal> { None }
+    fn from_flipper_key(&self, key: &FlipperKey) -> Option<DecodedSignal> {
+        if key.bits != MIN_COUNT_BIT {
+            return None;
+        }
+        Some(Self::key_signal(key.key_u64()?))
+    }
 
     /// `subghz_protocol_decoder_mazda_v0_serialize` (see the module doc, "Key files").
-    fn to_flipper_key(&self, decoded: &DecodedSignal) -> Option<FlipperKey> { None }
+    fn to_flipper_key(&self, decoded: &DecodedSignal) -> Option<FlipperKey> {
+        if decoded.data_count_bit != MIN_COUNT_BIT {
+            return None;
+        }
+        let (serial, button, counter) = Self::decode_key(decoded.data);
+        let mut key = FlipperKey::for_protocol("Mazda V0", MIN_COUNT_BIT, decoded.data);
+        key.push_u32("Checksum", Self::calculate_checksum(serial, button, counter).into());
+        key.push_u32("Serial", serial);
+        key.push_u32("Btn", button.into());
+        key.push_u32("Cnt", counter);
+        // mazda_v0_write_display → pp_write_display(name, mazda_v0_get_button_name(button)).
+        let name = match button {
+            0x01 => "Lock",
+            0x02 => "Unlock",
+            0x04 => "Trunk",
+            0x08 => "Remote",
+            _ => "??",
+        };
+        key.push("Disp", format!("Mazda V0 - {name}"));
+        Some(key)
+    }
 }
 
 impl Default for MazdaV0Decoder {

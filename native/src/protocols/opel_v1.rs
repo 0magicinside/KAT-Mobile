@@ -339,15 +339,49 @@ impl ProtocolDecoder for OpelV1Decoder {
         result
     }
 
-    fn supports_encoding(&self) -> bool { false }
+    fn supports_encoding(&self) -> bool {
+        false
+    }
 
-    fn encode(&self, _decoded: &DecodedSignal, _button: u8) -> Option<Vec<LevelDuration>> { None }
+    fn encode(&self, _decoded: &DecodedSignal, _button: u8) -> Option<Vec<LevelDuration>> {
+        None
+    }
 
     /// `subghz_protocol_decoder_opel_v1_deserialize` (see the module doc, "Key files").
-    fn from_flipper_key(&self, key: &FlipperKey) -> Option<DecodedSignal> { None }
+    fn from_flipper_key(&self, key: &FlipperKey) -> Option<DecodedSignal> {
+        if key.bits != 64 {
+            return None;
+        }
+        let cipher = key.key_u64()?;
+        let xtea: [u8; 16] = key
+            .hex_bytes_field("XteaKey")
+            .and_then(|k| k.try_into().ok())
+            .unwrap_or(XTEA_KEY);
+        let serial = key.u32_field("Serial").unwrap_or(0) & 0xFF_FFFF;
+        Some(frame_signal(serial, cipher, &decrypt_with_key(cipher, &xtea)))
+    }
 
     /// `subghz_protocol_decoder_opel_v1_serialize` as doctor-firmware writes it (see "Key files").
-    fn to_flipper_key(&self, decoded: &DecodedSignal) -> Option<FlipperKey> { None }
+    fn to_flipper_key(&self, decoded: &DecodedSignal) -> Option<FlipperKey> {
+        let (serial, cipher) = frame_of(decoded)?;
+        let pt = decrypt_fields(cipher);
+        let mut key = FlipperKey::for_protocol("Opel V1", 64, cipher);
+        if serial != 0 || pt.button != 0 || pt.count != 0 {
+            key.push_u32("Serial", serial);
+            key.push_u32("Btn", pt.button.into());
+            key.push_u32("Cnt", pt.count);
+        }
+        key.push_hex_bytes("XteaKey", &XTEA_KEY);
+        let name = match pt.button {
+            BTN_TRUNK => "Trunk",
+            BTN_LOCK => "Lock",
+            BTN_UNLOCK => "Unlock",
+            _ => "Unknown",
+        };
+        key.push("Disp", format!("Opel V1 - {name}"));
+        key.push_u32("Burst", pt.burst.into());
+        Some(key)
+    }
 }
 
 impl Default for OpelV1Decoder {

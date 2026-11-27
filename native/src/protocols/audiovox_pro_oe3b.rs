@@ -167,17 +167,30 @@ impl ProtocolDecoder for AudiovoxProOe3bDecoder {
         self.rx.feed(&mut self.decode, level, duration)
     }
 
-    fn supports_encoding(&self) -> bool { false }
+    fn supports_encoding(&self) -> bool {
+        false
+    }
 
     /// None: rtl_433 has no encoder and FoxFW's plugin refuses every key (see "Encoder").
-    fn encode(&self, _decoded: &DecodedSignal, _button: u8) -> Option<Vec<LevelDuration>> { None }
+    fn encode(&self, _decoded: &DecodedSignal, _button: u8) -> Option<Vec<LevelDuration>> {
+        None
+    }
 
     /// FoxFW's `subghz_protocol_decoder_audiovox_deserialize` (`Bit: 25`), then the decoder's
     /// checks (see "Key files").
-    fn from_flipper_key(&self, key: &FlipperKey) -> Option<DecodedSignal> { None }
+    fn from_flipper_key(&self, key: &FlipperKey) -> Option<DecodedSignal> {
+        let k = key.key_u64()?;
+        if key.bits != BITS || k >> BITS != 0 {
+            return None;
+        }
+        // The 25 key bits as the first bits of the frame's 4 bytes.
+        check(&((k as u32) << 7).to_be_bytes())
+    }
 
     /// FoxFW's `subghz_protocol_decoder_common_serialize` of the frame: `Bit: 25`, `Key` = `data`.
-    fn to_flipper_key(&self, d: &DecodedSignal) -> Option<FlipperKey> { None }
+    fn to_flipper_key(&self, d: &DecodedSignal) -> Option<FlipperKey> {
+        (d.data_count_bit == BITS && d.data >> BITS == 0).then(|| FlipperKey::for_protocol(FOXFW_NAME, BITS, d.data))
+    }
 }
 
 /// rtl_433's JSON for a decode (`data_print_jsons`, no `time`), for the oracle comparisons.

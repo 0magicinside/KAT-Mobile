@@ -159,10 +159,14 @@ impl ProtocolDecoder for ChryslerCarRemoteDecoder {
         self.rx.feed(&mut self.decode, level, duration)
     }
 
-    fn supports_encoding(&self) -> bool { false }
+    fn supports_encoding(&self) -> bool {
+        false
+    }
 
     /// Receive only, as rtl_433.
-    fn encode(&self, _decoded: &DecodedSignal, _button: u8) -> Option<Vec<LevelDuration>> { None }
+    fn encode(&self, _decoded: &DecodedSignal, _button: u8) -> Option<Vec<LevelDuration>> {
+        None
+    }
 }
 
 /// rtl_433's JSON for a decode (`data_print_jsons`, no `time`), for the oracle comparisons.

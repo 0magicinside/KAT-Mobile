@@ -172,10 +172,14 @@ impl ProtocolDecoder for CardinS466Decoder {
         self.rx.feed(&mut Decode(cardin_decode), level, duration_us)
     }
 
-    fn supports_encoding(&self) -> bool { false }
+    fn supports_encoding(&self) -> bool {
+        false
+    }
 
     /// Receive only, as rtl_433.
-    fn encode(&self, _decoded: &DecodedSignal, _button: u8) -> Option<Vec<LevelDuration>> { None }
+    fn encode(&self, _decoded: &DecodedSignal, _button: u8) -> Option<Vec<LevelDuration>> {
+        None
+    }
 }
 
 #[cfg(test)]

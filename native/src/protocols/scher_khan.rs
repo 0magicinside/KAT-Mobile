@@ -585,28 +585,64 @@ impl ProtocolDecoder for ScherKhanDecoder {
         None
     }
 
-    fn supports_encoding(&self) -> bool { false }
+    fn supports_encoding(&self) -> bool {
+        true
+    }
 
-    fn encode(&self, decoded: &DecodedSignal, button: u8) -> Option<Vec<LevelDuration>> { None }
+    fn encode(&self, decoded: &DecodedSignal, button: u8) -> Option<Vec<LevelDuration>> {
+        let bit_count = decoded.data_count_bit;
+        if !(MIN_COUNT_BIT..=64).contains(&bit_count) {
+            return None;
+        }
+        let key = encode_key(decoded.data, bit_count, button);
+        let mut signal = Vec::with_capacity(TX_REPEAT * (21 + bit_count * 2));
+        for _ in 0..TX_REPEAT {
+            upload_once(key, bit_count, &mut signal);
+        }
+        Some(signal)
+    }
 
     /// The frame `encode` sends: the key with the new button and counter (`encode_key`), as the
     /// C's emulate scene writes it back into its file. Needed because the upload, like the C's,
     /// carries the start bit plus `bit_count` data bits and so decodes back as a frame one bit
     /// longer ("Scher-Khan 52bit", no fields), which `app/tx.rs` could not match to the capture:
     /// the counter never advanced and every press re-sent counter + 1.
-    fn sent_signal(&self, decoded: &DecodedSignal, button: u8) -> Option<DecodedSignal> { None }
+    fn sent_signal(&self, decoded: &DecodedSignal, button: u8) -> Option<DecodedSignal> {
+        let bit_count = decoded.data_count_bit;
+        if !(MIN_COUNT_BIT..=64).contains(&bit_count) {
+            return None;
+        }
+        Some(Self::build(u128::from(encode_key(decoded.data, bit_count, button)), bit_count))
+    }
 
     /// `subghz_protocol_decoder_scher_khan_deserialize` (ProtoPirate: generic Bit/Key, Bit 35..=64)
     /// \+ the `check_remote_controller` its display runs: the variant and fields come from the key
     /// and the bit count; the file's Serial/Btn/Cnt are display copies the C overwrites. Longer
     /// frames (81/82-bit "MAGIC CODE PRO, Response") are refused like ProtoPirate refuses them: the
     /// C's 64-bit key keeps only their last 64 bits.
-    fn from_flipper_key(&self, key: &FlipperKey) -> Option<DecodedSignal> { None }
+    fn from_flipper_key(&self, key: &FlipperKey) -> Option<DecodedSignal> {
+        if !(MIN_COUNT_BIT..=64).contains(&key.bits) {
+            return None;
+        }
+        Some(Self::build(u128::from(key.key_u64()?), key.bits))
+    }
 
     /// `subghz_protocol_decoder_scher_khan_serialize` (ProtoPirate = Flipper-ARF): Protocol
     /// "Scher-Khan", Bit, Key, then Serial, Btn, Cnt (decimal; 0 for variants without fields, as
     /// `check_remote_controller` zeroes them). None for frames longer than 64 bits (see above).
-    fn to_flipper_key(&self, decoded: &DecodedSignal) -> Option<FlipperKey> { None }
+    fn to_flipper_key(&self, decoded: &DecodedSignal) -> Option<FlipperKey> {
+        let bits = decoded.data_count_bit;
+        if !(MIN_COUNT_BIT..=64).contains(&bits) {
+            return None;
+        }
+        let (serial, btn, cnt) = parse(decoded.data, bits).fields.unwrap_or((0, 0, 0));
+        let mut key = FlipperKey::for_protocol("Scher-Khan", bits, decoded.data);
+        key.key_word = true;
+        key.push_u32("Serial", serial);
+        key.push_u32("Btn", btn.into());
+        key.push_u32("Cnt", cnt.into());
+        Some(key)
+    }
 }
 
 impl Default for ScherKhanDecoder {

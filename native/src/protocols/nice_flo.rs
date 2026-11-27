@@ -191,13 +191,28 @@ impl ProtocolDecoder for NiceFloDecoder {
         None
     }
 
-    fn supports_encoding(&self) -> bool { false }
+    fn supports_encoding(&self) -> bool {
+        true
+    }
 
-    fn encode(&self, decoded: &DecodedSignal, _button: u8) -> Option<Vec<LevelDuration>> { None }
+    fn encode(&self, decoded: &DecodedSignal, _button: u8) -> Option<Vec<LevelDuration>> {
+        let bits = decoded.data_count_bit;
+        if !(MIN_COUNT_BIT..=MAX_KEY_BIT).contains(&bits) {
+            return None;
+        }
+        Some(with_repeats(&build_frame(decoded.data, bits), TX_REPEAT))
+    }
 
-    fn from_flipper_key(&self, key: &FlipperKey) -> Option<DecodedSignal> { None }
+    fn from_flipper_key(&self, key: &FlipperKey) -> Option<DecodedSignal> {
+        let (bits, data) = generic_fields(key);
+        (MIN_COUNT_BIT..=MAX_KEY_BIT)
+            .contains(&bits)
+            .then(|| decoded(data, bits))
+    }
 
-    fn to_flipper_key(&self, d: &DecodedSignal) -> Option<FlipperKey> { None }
+    fn to_flipper_key(&self, d: &DecodedSignal) -> Option<FlipperKey> {
+        Some(generic_key(NAME, d))
+    }
 }
 
 #[cfg(test)]

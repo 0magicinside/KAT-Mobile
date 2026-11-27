@@ -227,16 +227,43 @@ impl ProtocolDecoder for HondaV9Decoder {
         }
     }
 
-    fn supports_encoding(&self) -> bool { false }
+    fn supports_encoding(&self) -> bool {
+        false
+    }
 
-    fn encode(&self, _decoded: &DecodedSignal, _button: u8) -> Option<Vec<LevelDuration>> { None }
+    fn encode(&self, _decoded: &DecodedSignal, _button: u8) -> Option<Vec<LevelDuration>> {
+        None
+    }
 
     /// Rebuild a decode from a key file written by [Self::to_flipper_key] (Key = `d[0..8]`,
     /// TailHi / TailLo = `d[8..14]`).
-    fn from_flipper_key(&self, key: &FlipperKey) -> Option<DecodedSignal> { None }
+    fn from_flipper_key(&self, key: &FlipperKey) -> Option<DecodedSignal> {
+        if key.bits != FRAME_BITS {
+            return None;
+        }
+        let tail = (u64::from(key.u32_field("TailHi")?) << 32) | u64::from(key.u32_field("TailLo")?);
+        if tail >> 48 != 0 {
+            return None;
+        }
+        Some(fields(key.key_u64()?, tail))
+    }
 
     /// `subghz_protocol_decoder_honda_v9_serialize`.
-    fn to_flipper_key(&self, decoded: &DecodedSignal) -> Option<FlipperKey> { None }
+    fn to_flipper_key(&self, decoded: &DecodedSignal) -> Option<FlipperKey> {
+        if decoded.data_count_bit != FRAME_BITS {
+            return None;
+        }
+        let tail = decoded.extra?;
+        let mut key = FlipperKey::for_protocol(NAME, FRAME_BITS, decoded.data);
+        key.push_u32("Serial", decoded.serial?);
+        key.push_u32("Btn", decoded.button?.into());
+        key.push_u32("Cnt", decoded.counter?.into());
+        key.push_u32("Fingerprint", decoded.data as u32);
+        key.push_u32("CRC", (tail >> 40) as u32);
+        key.push_u32("TailHi", (tail >> 32) as u32);
+        key.push_u32("TailLo", tail as u32);
+        Some(key)
+    }
 }
 
 #[cfg(test)]
