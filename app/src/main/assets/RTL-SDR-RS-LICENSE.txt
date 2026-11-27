@@ -1,0 +1,14 @@
+RTL-SDR control driver notice
+=============================
+
+The embedded RTL-SDR USB control driver in native/src/rtlsdr/ (RTL2832U baseband
+and Rafael Micro R820T / R820T2 / R828D tuners, including RTL-SDR Blog V3/V4) is
+adapted from desktop KAT's vendored rtl-sdr-rs (originally by Chris Costes,
+https://github.com/ccostes/rtl-sdr-rs) and is licensed under the Mozilla Public
+License, v. 2.0 (MPL-2.0).
+
+You can obtain a copy of the MPL-2.0 at:
+https://mozilla.org/MPL/2.0/
+
+This build intentionally excludes GPL-licensed tuner drivers (e4k, fc0012,
+fc0013, fc2580).

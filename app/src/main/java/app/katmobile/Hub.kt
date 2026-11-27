@@ -80,16 +80,16 @@ object Hub {
                 val name=context.contentResolver.query(uri,arrayOf(android.provider.OpenableColumns.DISPLAY_NAME),null,null,null)?.use{if(it.moveToFirst())it.getString(0)else""}.orEmpty().ifBlank{uri.lastPathSegment.orEmpty()}
                 require(!name.endsWith(".cf32",true)){"This version analyzes CS8 and CU8 IQ files"}
                 val unsigned=name.endsWith(".cu8",true)
+                val iqFormat=if(unsigned)IqFormat.CU8 else IqFormat.CS8
                 val spec=StateFormat.iqSpec(name,s)
-                val engine=ReceivePipeline(s.copy(sampleRate=spec.rate,frequency=spec.target),spec.offsetHz){add(it.copy(source="IQ file"))};receiver=engine
-                status.value=RadioStatus(device="IQ file",frequency=engine.frequency,message="Analyzing: $name")
+                val engine=ReceivePipeline(s.copy(sampleRate=spec.rate,frequency=spec.target),spec.offsetHz,iqFormat,"IQ file",::add);receiver=engine
+                status.value=RadioStatus(device="IQ file",activeSampleRate=spec.rate,frequency=engine.frequency,message="Analyzing: $name")
                 context.contentResolver.openInputStream(uri)!!.use{input->
                     val buffer=ByteArray(32768);var carry=0;var read=0L;var refreshed=0L
                     while(true){ensureActive();val n=input.read(buffer,carry,buffer.size-carry);if(n<0){require(carry==0){"The IQ file contains an incomplete sample pair"};break}
                         val all=n+carry;val length=all and -2;val odd=if(all%2==1)buffer[all-1]else 0.toByte()
-                        if(unsigned)for(i in 0 until length)buffer[i]=((buffer[i].toInt()and 255)-128).toByte()
                         engine.process(buffer,length);read+=length
-                        if(System.currentTimeMillis()-refreshed>200){status.value=status.value.copy(bytes=read,powerDb=engine.powerDb,spectrum=Spectrum.fft(buffer,length));refreshed=System.currentTimeMillis()}
+                        if(System.currentTimeMillis()-refreshed>200){status.value=status.value.copy(bytes=read,powerDb=engine.powerDb,spectrum=Spectrum.fft(buffer,length,unsigned));refreshed=System.currentTimeMillis()}
                         carry=all%2;if(carry==1)buffer[0]=odd
                     }
                 };engine.flush();log("IQ analysis complete");status.value=status.value.copy(message="IQ analysis is complete")

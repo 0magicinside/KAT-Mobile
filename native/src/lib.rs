@@ -20,6 +20,9 @@ mod radio {
 
 mod mobile_rx;
 pub use mobile_rx::{ReceiveSession,ReceiveOutput};
+pub use radio::dsp::IqFormat;
+pub mod rtlsdr;
+pub mod mobile_rtlsdr;
 pub mod interop_fob;
 fn plural(n:usize)->&'static str{if n==1{""}else{"s"}}
 fn has_extension(path:&std::path::Path,extension:&str)->bool{

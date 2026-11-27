@@ -72,7 +72,7 @@ class AppTest {
     }
     @Test fun noUsbDeviceCannotBecomeFakeLiveReception(){
         compose.onNodeWithText("Start RX").performClick()
-        compose.onNodeWithText("No HackRF device.",substring=true).assertExists()
+        compose.onNodeWithText("No HackRF or RTL-SDR device found.",substring=true).assertExists()
         assertFalse(Hub.status.value.running)
         compose.onNodeWithText("OK").performClick()
     }
@@ -255,5 +255,25 @@ class AppTest {
         compose.onNodeWithText("Search protocols").performTextInput("Princeton")
         compose.onNodeWithTag("protocol-group-Nexus / TFA TH").assertDoesNotExist()
         compose.onNodeWithTag("protocol-group-Princeton").assertExists()
+    }
+    @Test fun rtlSdrSettingsAreVisibleAndEditable(){
+        compose.onNodeWithContentDescription("Settings",useUnmergedTree=true).performClick()
+        compose.onNodeWithTag("settings-list").performScrollToNode(hasTestTag("rtlsdr-settings"))
+        compose.onNodeWithTag("rtlsdr-settings").assertIsDisplayed()
+        compose.onNodeWithText("RTL-SDR sample rate: 2000000").assertExists()
+        compose.onNodeWithText("Auto tuner gain (AGC)").assertExists()
+    }
+    @Test fun nativeCoreRecognizesUnsignedCu8IqForRtlSdr(){
+        assertTrue(NativeDecoder.available)
+        val cs8=princetonIq(225000.0)
+        val cu8=ByteArray(cs8.size){i->(cs8[i].toInt()+128).coerceIn(0,255).toByte()}
+        val captures=mutableListOf<Capture>()
+        ReceivePipeline(RadioSettings(modulation="AM"),250000.0,IqFormat.CU8,RadioKind.RTLSDR.label,captures::add).use{rx->
+            for(start in cu8.indices step 16384)rx.process(cu8.copyOfRange(start,minOf(cu8.size,start+16384)))
+            rx.flush()
+        }
+        val recognized=captures.firstOrNull{it.protocol.split(" + ").contains("Princeton")}
+        assertNotNull("No CU8 Princeton decoded: ${captures.map{it.protocol}}",recognized)
+        assertEquals("RTL-SDR",recognized!!.source)
     }
 }

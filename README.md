@@ -1,10 +1,10 @@
 # KAT Mobile
 
 The Android edition of [KAT](https://github.com/KaraZajac/KAT), the Keyfob Analysis Toolkit. A phone
-with a **HackRF** on USB OTG receives, records, identifies and transmits car key fob, gate, garage
-door and sensor signals with KAT's own code, without a computer: Replay, and KAT's encoders for
-"Send next code" and the car and gate buttons, a rolling code's counter advancing with every press.
-Key recovery is not part of the app.
+with a **HackRF** or **RTL-SDR** on USB OTG receives, records and identifies car key fob, gate, garage
+door and sensor signals with KAT's own code, without a computer — and transmits with a HackRF: Replay,
+and KAT's encoders for "Send next code" and the car and gate buttons, a rolling code's counter advancing
+with every press. Key recovery is not part of the app.
 
 KAT Mobile was written by **CooKie** as an Android adaptation of KAT, and is maintained here as
 KAT's official Android app.
@@ -28,12 +28,17 @@ arising from use of this software.
 - **HackRF over USB OTG** — a HackRF One, Jawbreaker or rad1o through Android's USB host API: no
   root and no driver app. Frequency, sample rate (2–20 MS/s), LNA and VGA gains, the RF amplifier,
   the baseband filter and AM, FM or both (AUTO).
+- **RTL-SDR over USB OTG (receive-only)** — direct support for RTL2832U dongles with R820T, R820T2
+  or R828D tuners (including RTL-SDR Blog V3/V4 and Nooelec NESDR) through Android's USB host API:
+  no root and no external driver app. Sample rate (1.024–2.4 MS/s, 2.0 MS/s default), auto or manual
+  tuner gain, PPM frequency correction, optional bias-tee, CU8 live spectrum/waterfall and `.cu8` IQ
+  recording.
 - **KAT's core** — KAT 1.30.0's receive pipeline (burst detection, channel filtering, the AM and
   FM slicers), its protocol decoders and encoders and its embedded keys, built from KAT's Rust
   source and called over JNI. A signal is listed with its protocol, bit count, whether its
   checksum holds, and its serial, button and counter, as KAT lists them; frames that fail their
   checksum are dropped.
-- **Transmit** — from a signal's details, as KAT's signal menu offers it: **Replay** sends the
+- **Transmit (HackRF)** — from a signal's details, as KAT's signal menu offers it: **Replay** sends the
   recorded pulses; a car remote gets **TX Lock, Unlock, Trunk and Panic**, a gate, garage, barrier
   or alarm remote **Send next code** and its own buttons, from KAT's encoders with the copies KAT
   sends. A rolling code's capture keeps the frame sent, so the next press sends the code after.
@@ -46,8 +51,8 @@ arising from use of this software.
   the history grouped by protocol, with repeats of the same signal counted instead of listed.
 - **Frequency hopping** — a fixed time on each frequency (Flipper's hopper list by default), which
   does not wait for a signal to end.
-- **IQ recording and analysis** — record raw CS8 IQ at one frequency (with a storage quota), and
-  analyze CS8 or CU8 recordings later, from the phone or from KAT on a computer.
+- **IQ recording and analysis** — record raw CS8 (HackRF) or CU8 (RTL-SDR) IQ at one frequency (with
+  a storage quota), and analyze CS8 or CU8 recordings later, from the phone or from KAT on a computer.
 - **Import and export** — KAT `.fob` files (every saved pulse, readable by desktop KAT), Flipper RAW
   `.sub` files, JSON, whole sessions, and KAT's `config.ini` (its radio, hopping and history
   settings).
@@ -61,8 +66,9 @@ Download `KAT-Mobile-<version>.apk` from the [releases page](https://github.com/
 (each has a `.sha256` checksum), allow your browser or file manager to install apps, and open it.
 It needs a 64-bit ARM phone with Android 8.0 or later and USB OTG.
 
-Connect the HackRF with an OTG adapter or cable and press **Start RX**; Android asks for USB access
-the first time. A HackRF draws up to 500 mA: if the phone cannot power it, use a powered USB hub.
+Connect a HackRF or RTL-SDR with an OTG adapter or cable and press **Start RX**; Android asks for USB
+access the first time. A HackRF draws up to 500 mA and an RTL-SDR ~250–300 mA: if the phone cannot
+power it, use a powered USB hub.
 
 Releases are debug-signed for now. When KAT Mobile moves to a release key, the new build will not
 install over the old one: export your session first (Signals, Export session), uninstall, install
@@ -116,14 +122,16 @@ with a receiver you own (KAT with an RTL-SDR, for instance).
 
 ## How it is built
 
-- `app/` — the Kotlin and Jetpack Compose app: the HackRF over USB (`HackRfUsb.kt`, and
-  `Transmit.kt` for desktop KAT's transmit sequence), the radio service, storage, import and export,
-  and the tests.
+- `app/` — the Kotlin and Jetpack Compose app: the USB SDR abstraction (`SdrUsb.kt`), HackRF over
+  USB (`HackRfUsb.kt`, and `Transmit.kt` for desktop KAT's transmit sequence), RTL-SDR over USB
+  (`RtlSdrUsb.kt`), the radio service, storage, import and export, and the tests.
 - `native/src/` — KAT 1.30.0's code: its receive pipeline, decoders, encoders and transmit waveform
   (`radio/tx.rs`). 219 files are KAT's unchanged; the other four leave out what the app does not
-  have (key recovery, the user's key files, the vulnerability database). `lib.rs`, `mobile_rx.rs`
-  and `mobile_tx.rs` are the JNI layer (`mobile_tx.rs` does what desktop KAT's app does around its
-  encoders), and `interop_fob.rs` is KAT's `.fob` reader.
+  have (key recovery, the user's key files, the vulnerability database). `lib.rs`, `mobile_rx.rs`,
+  `mobile_tx.rs` and `mobile_rtlsdr.rs` are the JNI layer (`mobile_tx.rs` does what desktop KAT's
+  app does around its encoders), `rtlsdr/` is the embedded MPL-2.0 RTL2832U + R820T/R820T2/R828D
+  control driver adapted from desktop KAT's `rtl-sdr-rs`, and `interop_fob.rs` is KAT's `.fob`
+  reader.
 - `tools/sync-kat-core.sh` brings a KAT release into `native/src`: `tools/sync-kat-core.sh ../KAT
   v1.30.0 v1.31.0` merges KAT's changes in and keeps KAT Mobile's edits. A conflict means KAT
   changed code that KAT Mobile edits. KAT Mobile's version follows KAT's.
@@ -137,4 +145,6 @@ with a receiver you own (KAT with an RTL-SDR, for instance).
 
 ## License
 
-BSD 3-Clause, like KAT: see [LICENSE](LICENSE).
+BSD 3-Clause, like KAT: see [LICENSE](LICENSE). The embedded RTL-SDR control driver in
+`native/src/rtlsdr/` is adapted from `rtl-sdr-rs` under MPL-2.0 (see
+`app/src/main/assets/RTL-SDR-RS-LICENSE.txt`).
