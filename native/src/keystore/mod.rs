@@ -1,0 +1,873 @@
+//! Embedded keystore: binary blob of protocol keys (KIA, Star Line, VAG).
+//! Matches ProtoPirate key types (keys.c: KIA_KEY1..4). Loaded at startup instead of keystore_dir.
+
+mod embedded;
+
+use std::convert::TryInto;
+use std::sync::OnceLock;
+
+use crate::plural;
+
+/// File name of the user keystore in KAT's config folder: the Flipper's plaintext user keystore
+/// (`subghz/assets/keeloq_mfcodes_user`), lines `KEY:TYPE:NAME` (16 hex digits, the learning type
+/// in Flipper numbering, the manufacturer name) after an optional `Filetype`/`Version`/`Encryption: 0`
+/// header. Its keys are appended to the embedded ones, as the Flipper loads the user keystore after
+/// its own.
+pub const USER_KEYSTORE_FILE: &str = "keeloq_mfcodes_user";
+
+static USER_ENTRIES: OnceLock<Vec<(String, u32, u64)>> = OnceLock::new();
+
+/// What [parse_user_keystore] returns: the entries (name, type, key) and the line errors.
+pub type ParsedUserKeystore = (Vec<(String, u32, u64)>, Vec<(usize, String)>);
+
+/// Parse a Flipper user keystore. Returns the entries and the line errors (1-based line, text).
+pub fn parse_user_keystore(text: &str) -> Result<ParsedUserKeystore, String> {
+    let mut entries = Vec::new();
+    let mut errors = Vec::new();
+    for (i, raw) in text.lines().enumerate() {
+        let line = raw.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        if let Some(v) = line.strip_prefix("Encryption:") {
+            if v.trim() != "0" {
+                return Err("encrypted keystore (only plaintext `Encryption: 0` files can be read)".to_string());
+            }
+            continue;
+        }
+        if line.starts_with("Filetype:") || line.starts_with("Version:") {
+            continue;
+        }
+        let mut parts = line.splitn(3, ':');
+        let (Some(key), Some(ty), Some(name)) = (parts.next(), parts.next(), parts.next()) else {
+            errors.push((i + 1, raw.to_string()));
+            continue;
+        };
+        match (u64::from_str_radix(key.trim(), 16), ty.trim().parse::<u32>()) {
+            (Ok(k), Ok(t)) if key.trim().len() == 16 && !name.trim().is_empty() => {
+                entries.push((name.trim().to_string(), t, k))
+            }
+            _ => errors.push((i + 1, raw.to_string())),
+        }
+    }
+    Ok((entries, errors))
+}
+
+/// Load `<config dir>/keeloq_mfcodes_user` if it exists (once, at startup, before any decode).
+/// Returns a status line for the user when a file was found.
+pub fn load_user_keystore(config_dir: &std::path::Path) -> Option<String> { None }
+
+/// File name of the user's JLR car keys in KAT's config folder. One car's 16-byte key per line:
+/// 32 hex digits (spaces and dashes are ignored), an optional `:name` after them; `#` starts a
+/// comment. KAT ships none; a key is the car's own, read from the owner's keyless module's D-Flash
+/// (offset 0x0E14) — see the Ford V1 (JLR) page. With a matching key, KAT deciphers those fobs'
+/// button, counter and ID and can make their next code.
+pub const JLR_KEYS_FILE: &str = "jlr_keys";
+
+/// Parse a JLR key file. Returns the keys (name, 16 bytes) and the line errors (1-based line, text).
+pub fn parse_jlr_keys(text: &str) -> (Vec<(String, [u8; 16])>, Vec<(usize, String)>) {
+    let mut keys = Vec::new();
+    let mut errors = Vec::new();
+    for (i, raw) in text.lines().enumerate() {
+        let line = raw.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let (hex, name) = match line.split_once(':') {
+            Some((h, n)) => (h, n.trim().to_string()),
+            None => (line, String::new()),
+        };
+        let hex: String = hex.chars().filter(|c| !c.is_whitespace() && *c != '-').collect();
+        let bytes = (hex.len() == 32)
+            .then(|| {
+                (0..16)
+                    .map(|j| u8::from_str_radix(&hex[2 * j..2 * j + 2], 16))
+                    .collect::<Result<Vec<u8>, _>>()
+                    .ok()
+            })
+            .flatten();
+        match bytes {
+            Some(b) => {
+                let name = if name.is_empty() { format!("key {}", keys.len() + 1) } else { name };
+                keys.push((name, b.try_into().unwrap()));
+            }
+            None => errors.push((i + 1, raw.to_string())),
+        }
+    }
+    (keys, errors)
+}
+
+/// Load `<config dir>/jlr_keys` if it exists (once, at startup, before any decode). Returns a status
+/// line when a file was found.
+pub fn load_jlr_keys(config_dir: &std::path::Path) -> Option<String> {
+    if cfg!(test) {
+        panic!("a test must not load the user's JLR keys: the tests share one process");
+    }
+    let path = config_dir.join(JLR_KEYS_FILE);
+    let text = std::fs::read_to_string(&path).ok()?;
+    let (keys, errors) = parse_jlr_keys(&text);
+    let n = keys.len();
+    crate::protocols::keys::get_keystore_mut().load_jlr_keys(keys);
+    let loaded = format!("Loaded {n} JLR car key{} from {}", plural(n), path.display());
+    Some(if errors.is_empty() {
+        loaded
+    } else {
+        format!("{loaded} ({} bad line{}, first: line {})", errors.len(), plural(errors.len()), errors[0].0)
+    })
+}
+
+/// Append a key to `<config dir>/keeloq_mfcodes_user` (`KEY:TYPE:NAME`, as the Flipper's user
+/// keystore), creating the file with the Flipper header when it doesn't exist. Returns the path; an
+/// identical line already in the file is not written again.
+pub fn append_user_key(config_dir: &std::path::Path, name: &str, learning: u32, key: u64) -> std::io::Result<std::path::PathBuf> { panic!("RX core does not write keys") }
+
+/// Append a recovered JLR car key to `<config dir>/jlr_keys` (`KEYHEX:NAME`, 32 hex digits). Creates
+/// the file with a header comment when it does not exist; an identical line is not written again.
+pub fn append_jlr_key(config_dir: &std::path::Path, name: &str, key: &[u8; 16]) -> std::io::Result<std::path::PathBuf> {
+    use std::io::Write;
+    let path = config_dir.join(JLR_KEYS_FILE);
+    let hex: String = key.iter().map(|b| format!("{b:02X}")).collect();
+    let line = format!("{hex}:{name}");
+    let existing = std::fs::read_to_string(&path).unwrap_or_default();
+    if existing.lines().any(|l| l.split(':').next().map(str::trim) == Some(hex.as_str())) {
+        return Ok(path);
+    }
+    std::fs::create_dir_all(config_dir)?;
+    let mut f = std::fs::OpenOptions::new().create(true).append(true).open(&path)?;
+    if existing.is_empty() {
+        writeln!(f, "# JLR car keys (32 hex digits, optional :name). KAT ships none.")?;
+    } else if !existing.ends_with('\n') {
+        writeln!(f)?;
+    }
+    writeln!(f, "{line}")?;
+    Ok(path)
+}
+
+/// File name of the Audi BCM2 car keys in KAT's config folder. One car per line:
+/// `<32-hex K> <8-hex car_value> <8-hex id_key1> [<8-hex id_key2> …] : name` (fields split on
+/// whitespace or commas, `#` comments). Each field's secrets come from the car's own BCM2 module;
+/// KAT ships none. Used by the Audi V3 (BCM2) encoder ([crate::protocols::audi_v3]).
+pub const AUDI_BCM2_KEYS_FILE: &str = "audi_bcm2_keys";
+
+/// Parse the Audi BCM2 key file: the cars and the line errors (1-based line, text).
+pub fn parse_audi_bcm2_keys(text: &str) -> (Vec<crate::protocols::keys::AudiBcm2Car>, Vec<(usize, String)>) {
+    use crate::protocols::keys::AudiBcm2Car;
+    let hex_bytes = |s: &str, n: usize| -> Option<Vec<u8>> {
+        let h: String = s.chars().filter(|c| !c.is_whitespace() && *c != '-').collect();
+        (h.len() == 2 * n).then(|| (0..n).map(|j| u8::from_str_radix(&h[2 * j..2 * j + 2], 16)).collect::<Result<Vec<_>, _>>().ok()).flatten()
+    };
+    let (mut cars, mut errors) = (Vec::new(), Vec::new());
+    for (i, raw) in text.lines().enumerate() {
+        let line = raw.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let (fields, name) = match line.split_once(':') {
+            Some((f, n)) => (f, n.trim().to_string()),
+            None => (line, String::new()),
+        };
+        let toks: Vec<&str> = fields.split([' ', '\t', ',']).filter(|t| !t.is_empty()).collect();
+        let car = (toks.len() >= 3 && toks.len() <= 10)
+            .then(|| {
+                let key: [u8; 16] = hex_bytes(toks[0], 16)?.try_into().ok()?;
+                let car_value: [u8; 4] = hex_bytes(toks[1], 4)?.try_into().ok()?;
+                let key_ids = toks[2..].iter().map(|t| hex_bytes(t, 4).and_then(|b| b.try_into().ok())).collect::<Option<Vec<[u8; 4]>>>()?;
+                Some(AudiBcm2Car { name: if name.is_empty() { format!("car {}", cars.len() + 1) } else { name.clone() }, key, car_value, key_ids })
+            })
+            .flatten();
+        match car {
+            Some(c) => cars.push(c),
+            None => errors.push((i + 1, raw.to_string())),
+        }
+    }
+    (cars, errors)
+}
+
+/// Load `<config dir>/audi_bcm2_keys` if it exists (once, at startup, before any decode). Returns a
+/// status line for the UI, or None when there is no file.
+pub fn load_audi_bcm2_keys(config_dir: &std::path::Path) -> Option<String> {
+    if cfg!(test) {
+        panic!("a test must not load the user's Audi BCM2 keys: the tests share one process");
+    }
+    let path = config_dir.join(AUDI_BCM2_KEYS_FILE);
+    let text = std::fs::read_to_string(&path).ok()?;
+    let (cars, errors) = parse_audi_bcm2_keys(&text);
+    let n = cars.len();
+    crate::protocols::keys::get_keystore_mut().load_audi_bcm2_keys(cars);
+    let loaded = format!("Loaded {n} Audi BCM2 car key{} from {}", plural(n), path.display());
+    Some(if errors.is_empty() { loaded } else { format!("{loaded} ({} bad line{}, first: line {})", errors.len(), plural(errors.len()), errors[0].0) })
+}
+
+/// File name of the BMW/Mini **CAS3** fob secrets in KAT's config folder. One fob per line:
+/// `<4-hex ID> <8-hex UID> <12-hex KEY48> [<≤8-hex COUNTER>] [name]` — fields split on whitespace
+/// or commas, `#` comments. The ID is the fob's 16-bit air ID (`b2 b3`); UID/KEY48 are the HITAG2
+/// per-key secrets and COUNTER the last-seen 32-bit counter (default 0). Every field comes from the
+/// car's own CAS3 module; KAT ships none. Used by the BMW/Mini V3 verify/encode path
+/// ([`crate::protocols::bmw_v3`]).
+pub const BMW_CAS3_KEYS_FILE: &str = "bmw_cas3_keys";
+
+/// Parse the BMW CAS3 fob file: the fobs and the line errors (1-based line, text).
+pub fn parse_bmw_cas3_keys(text: &str) -> (Vec<crate::protocols::keys::BmwCas3Fob>, Vec<(usize, String)>) {
+    use crate::protocols::keys::BmwCas3Fob;
+    let is_hex = |s: &str| !s.is_empty() && s.chars().all(|c| c.is_ascii_hexdigit());
+    let (mut fobs, mut errors) = (Vec::new(), Vec::new());
+    for (i, raw) in text.lines().enumerate() {
+        let line = raw.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let toks: Vec<&str> = line.split([' ', '\t', ',']).filter(|t| !t.is_empty()).collect();
+        let fob = (toks.len() >= 3)
+            .then(|| {
+                let id = (toks[0].len() == 4 && is_hex(toks[0])).then(|| u16::from_str_radix(toks[0], 16).ok()).flatten()?;
+                let uid = (toks[1].len() == 8 && is_hex(toks[1])).then(|| u32::from_str_radix(toks[1], 16).ok()).flatten()?;
+                let key: [u8; 6] = (toks[2].len() == 12 && is_hex(toks[2]))
+                    .then(|| (0..6).map(|j| u8::from_str_radix(&toks[2][2 * j..2 * j + 2], 16)).collect::<Result<Vec<_>, _>>().ok())
+                    .flatten()?
+                    .try_into()
+                    .ok()?;
+                // An optional counter: the 4th token when it is ≤8 hex digits; otherwise it starts the name.
+                let (counter, name_from) = match toks.get(3) {
+                    Some(t) if t.len() <= 8 && is_hex(t) => (u32::from_str_radix(t, 16).ok()?, 4),
+                    _ => (0, 3),
+                };
+                let name = toks[name_from..].join(" ");
+                Some(BmwCas3Fob {
+                    name: if name.is_empty() { format!("fob {}", fobs.len() + 1) } else { name },
+                    id,
+                    uid,
+                    key,
+                    counter,
+                })
+            })
+            .flatten();
+        match fob {
+            Some(f) => fobs.push(f),
+            None => errors.push((i + 1, raw.to_string())),
+        }
+    }
+    (fobs, errors)
+}
+
+/// Load `<config dir>/bmw_cas3_keys` if it exists (once, at startup, before any decode). Returns a
+/// status line for the UI, or None when there is no file.
+pub fn load_bmw_cas3_keys(config_dir: &std::path::Path) -> Option<String> {
+    if cfg!(test) {
+        panic!("a test must not load the user's BMW CAS3 keys: the tests share one process");
+    }
+    let path = config_dir.join(BMW_CAS3_KEYS_FILE);
+    let text = std::fs::read_to_string(&path).ok()?;
+    let (fobs, errors) = parse_bmw_cas3_keys(&text);
+    let n = fobs.len();
+    crate::protocols::keys::get_keystore_mut().load_bmw_cas3_fobs(fobs);
+    let loaded = format!("Loaded {n} BMW/Mini CAS3 fob{} from {}", plural(n), path.display());
+    Some(if errors.is_empty() { loaded } else { format!("{loaded} ({} bad line{}, first: line {})", errors.len(), plural(errors.len()), errors[0].0) })
+}
+
+/// File name of the BMW **CAS4** car keys in KAT's config folder. One car per line: a 32-hex
+/// per-vehicle **master** key (the AES key that diversifies each remote's key,
+/// [`crate::protocols::bmw_rke::derive_key`]), then an optional name. Each remote's key derives from
+/// the master at verify time; a line may instead give one or more learned keys directly as
+/// `<key-number>=<32-hex>` tokens. The master is read from the car's own CAS4 module; KAT ships none.
+pub const BMW_CAS4_KEYS_FILE: &str = "bmw_cas4_keys";
+
+/// Parse the BMW CAS4 key file: the cars and the line errors (1-based line, text). A line is a
+/// 32-hex master (or `-` for none) optionally followed by `<num>=<32-hex>` per-remote keys and a
+/// name.
+pub fn parse_bmw_cas4_keys(text: &str) -> (Vec<crate::protocols::keys::BmwCas4Car>, Vec<(usize, String)>) {
+    use crate::protocols::keys::{BmwCas4Car, BmwKey};
+    let hex16 = |s: &str| -> Option<[u8; 16]> {
+        let h: String = s.chars().filter(|c| !c.is_whitespace() && *c != '-').collect();
+        (h.len() == 32).then(|| (0..16).map(|j| u8::from_str_radix(&h[2 * j..2 * j + 2], 16)).collect::<Result<Vec<_>, _>>().ok()).flatten().and_then(|v| v.try_into().ok())
+    };
+    let (mut cars, mut errors) = (Vec::new(), Vec::new());
+    for (i, raw) in text.lines().enumerate() {
+        let line = raw.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let toks: Vec<&str> = line.split([' ', '\t', ',']).filter(|t| !t.is_empty()).collect();
+        let car = (|| {
+            let first = *toks.first()?;
+            // the master (32 hex) or "-" for a car whose per-remote keys are given directly
+            let master = if first == "-" { None } else { Some(hex16(first)?) };
+            let mut keys = Vec::new();
+            let mut name_from = 1;
+            for (k, tok) in toks.iter().enumerate().skip(1) {
+                if let Some((num, hex)) = tok.split_once('=') {
+                    let num = num.parse::<u8>().ok()?;
+                    let key = hex16(hex)?;
+                    keys.push(BmwKey { num, key });
+                    name_from = k + 1;
+                } else {
+                    break;
+                }
+            }
+            if master.is_none() && keys.is_empty() {
+                return None;
+            }
+            let name = toks[name_from..].join(" ");
+            Some(BmwCas4Car { name: if name.is_empty() { format!("car {}", cars.len() + 1) } else { name }, master, keys })
+        })();
+        match car {
+            Some(c) => cars.push(c),
+            None => errors.push((i + 1, raw.to_string())),
+        }
+    }
+    (cars, errors)
+}
+
+/// Load `<config dir>/bmw_cas4_keys` if it exists (once, at startup, before any decode). Returns a
+/// status line for the UI, or None when there is no file.
+pub fn load_bmw_cas4_keys(config_dir: &std::path::Path) -> Option<String> {
+    if cfg!(test) {
+        panic!("a test must not load the user's BMW CAS4 keys: the tests share one process");
+    }
+    let path = config_dir.join(BMW_CAS4_KEYS_FILE);
+    let text = std::fs::read_to_string(&path).ok()?;
+    let (cars, errors) = parse_bmw_cas4_keys(&text);
+    let n = cars.len();
+    crate::protocols::keys::get_keystore_mut().load_bmw_cas4_keys(cars);
+    let loaded = format!("Loaded {n} BMW CAS4 car key{} from {}", plural(n), path.display());
+    Some(if errors.is_empty() { loaded } else { format!("{loaded} ({} bad line{}, first: line {})", errors.len(), plural(errors.len()), errors[0].0) })
+}
+
+/// The PSA older-code key-table file: one line of 32 hex characters (16 bytes), the BSI module's
+/// global table. `#` comments and whitespace/dashes are ignored. KAT ships the table
+/// ([`PSA_BSI_TABLE`]); this file, when present, overrides it.
+pub const PSA_BSI_KEY_FILE: &str = "psa_bsi_key";
+
+/// The PSA older-code key table KAT ships: the single global 16-byte table of the BSI block cipher,
+/// recovered from a Peugeot 307 BSI firmware image (GitHub issue #6; the report under
+/// `reports/2026-psa-rke-73373067`). It is the same in every BSI of the ~2001–2012 generation, so
+/// with it KAT deciphers and re-encodes every affected Peugeot/Citroën older-code remote with no
+/// per-car secret. A `psa_bsi_key` file in the config dir overrides it.
+pub const PSA_BSI_TABLE: [u8; 16] = [0xA3, 0x55, 0x85, 0x67, 0xB4, 0x73, 0x11, 0x9D, 0x6A, 0xCC, 0xD0, 0x43, 0xF1, 0x2B, 0x7C, 0xB8];
+
+/// The PSA 2-Button cipher key table KAT ships: the 16-byte table of the same block-cipher family
+/// that deciphers a Valeo two-button Citroën/Peugeot flip key's 64-bit code
+/// ([`crate::protocols::psa_two_button`]; the report under `reports/2026-psa-2button-valeo`).
+/// Recovered by differential cryptanalysis of one key's captured presses (its first four bytes fold
+/// into that key's constants and read as zero). **Whether one table serves the whole key family, as
+/// the older-code table does, is not established — it is proven on one key only.** A
+/// `psa_2button_key` file in the config dir overrides it.
+pub const PSA_2BUTTON_TABLE: [u8; 16] =
+    [0x00, 0x00, 0x00, 0x00, 0x2D, 0x55, 0x3A, 0xCB, 0x67, 0x84, 0xDC, 0x09, 0x81, 0x6B, 0x4B, 0xBB];
+
+/// Parse a `psa_bsi_key` file: the first line that is 32 hex characters is the table. Returns the
+/// table (if found) and the 1-based numbers of any non-empty, non-comment lines that were not it.
+pub fn parse_psa_bsi_key(text: &str) -> (Option<[u8; 16]>, Vec<usize>) {
+    let mut table = None;
+    let mut errors = Vec::new();
+    for (i, raw) in text.lines().enumerate() {
+        let line = raw.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let hex: String = line.chars().filter(|c| !c.is_whitespace() && *c != '-').collect();
+        let bytes = (hex.len() == 32)
+            .then(|| {
+                (0..16).map(|j| u8::from_str_radix(&hex[2 * j..2 * j + 2], 16)).collect::<Result<Vec<u8>, _>>().ok()
+            })
+            .flatten();
+        match bytes {
+            Some(b) if table.is_none() => table = Some(b.try_into().unwrap()),
+            _ => errors.push(i + 1),
+        }
+    }
+    (table, errors)
+}
+
+/// Put the PSA older-code table into the keystore at startup (once, before any decode): the
+/// built-in [`PSA_BSI_TABLE`], unless a `psa_bsi_key` file in the config dir overrides it. Returns a
+/// status line only when a file was present (the built-in table loads silently).
+pub fn load_psa_bsi_key(config_dir: &std::path::Path) -> Option<String> {
+    if cfg!(test) {
+        panic!("a test must not load the PSA BSI key: the tests share one process");
+    }
+    let path = config_dir.join(PSA_BSI_KEY_FILE);
+    let file = std::fs::read_to_string(&path).ok();
+    let (table, errors) = psa_table_for(file.as_deref());
+    crate::protocols::keys::get_keystore_mut().load_psa_bsi_table(Some(table));
+    let Some(text) = file.as_deref() else {
+        return None; // no file: the built-in table loads silently
+    };
+    let has_table = parse_psa_bsi_key(text).0.is_some();
+    let loaded = if has_table {
+        format!("Loaded the PSA older-code key from {}", path.display())
+    } else {
+        format!("No 16-byte key in {} (using the built-in table)", path.display())
+    };
+    Some(if errors.is_empty() { loaded } else { format!("{loaded} ({} line{} ignored)", errors.len(), plural(errors.len())) })
+}
+
+/// File name of the PSA 2-Button cipher key (16-byte table, 32 hex characters on one line).
+pub const PSA_2BUTTON_KEY_FILE: &str = "psa_2button_key";
+
+/// Put the built-in PSA 2-Button table [`PSA_2BUTTON_TABLE`] into the keystore, unless a
+/// `psa_2button_key` file in the config dir overrides it (same one-line 32-hex format as
+/// `psa_bsi_key`). Returns a status line only when a file was present (the built-in loads silently).
+pub fn load_psa_2button_key(config_dir: &std::path::Path) -> Option<String> {
+    if cfg!(test) {
+        panic!("a test must not load the PSA 2-Button key: the tests share one process");
+    }
+    let path = config_dir.join(PSA_2BUTTON_KEY_FILE);
+    let file = std::fs::read_to_string(&path).ok();
+    let (table, errors) = match file.as_deref() {
+        None => (PSA_2BUTTON_TABLE, Vec::new()),
+        Some(text) => {
+            let (table, errors) = parse_psa_bsi_key(text); // identical one-line 32-hex format
+            (table.unwrap_or(PSA_2BUTTON_TABLE), errors)
+        }
+    };
+    crate::protocols::keys::get_keystore_mut().load_psa_2button_table(Some(table));
+    let text = file.as_deref()?; // no file: the built-in table loads silently
+    let loaded = if parse_psa_bsi_key(text).0.is_some() {
+        format!("Loaded the PSA 2-Button key from {}", path.display())
+    } else {
+        format!("No 16-byte key in {} (using the built-in table)", path.display())
+    };
+    Some(if errors.is_empty() { loaded } else { format!("{loaded} ({} line{} ignored)", errors.len(), plural(errors.len())) })
+}
+
+/// The PSA older-code table to use, given the `psa_bsi_key` file's text (None when there is no
+/// file): the file's table when it has one, otherwise the built-in [`PSA_BSI_TABLE`]. Also returns
+/// the 1-based numbers of any file lines that were not a valid table.
+fn psa_table_for(file_text: Option<&str>) -> ([u8; 16], Vec<usize>) {
+    match file_text {
+        None => (PSA_BSI_TABLE, Vec::new()),
+        Some(text) => {
+            let (table, errors) = parse_psa_bsi_key(text);
+            (table.unwrap_or(PSA_BSI_TABLE), errors)
+        }
+    }
+}
+
+/// User keystore entries (empty unless [load_user_keystore] found a file).
+fn user_entries() -> &'static [(String, u32, u64)] {
+    USER_ENTRIES.get().map_or(&[], Vec::as_slice)
+}
+
+/// Type IDs that are KeeLoq manufacturer keys (64-bit keys used for keeloq_decrypt).
+const KEELOQ_MF_TYPES: &[u32] = &[0, 1, 2, 10, 20];
+
+/// Names for each key entry in the blob (same order as entries before VAG). Used for fallback decode display.
+const KEY_ENTRY_NAMES: &[&str] = &[
+    "KGB/Subaru",
+    "Magic_2",
+    "IronLogic",
+    "Stilmatic",
+    "Pandora_Test_Debug_2",
+    "Rosh",
+    "Dea_Mio",
+    "Leopard",
+    "Sheriff",
+    "Cenmax",
+    "Centurion",
+    "Guard_RF-311A",
+    "Pandora_PRO",
+    "Cardin_S449",
+    "Pandora_DEA",
+    "Pandora_GIBIDI",
+    "Pandora_MCODE",
+    "Pandora_Unknown_1",
+    "Pandora_SUZUKI",
+    "Harpoon",
+    "Gibidi",
+    "Pandora_Unknown_2",
+    "Jarolift",
+    "KEY",
+    "Novoferm",
+    "Pandora_SUBARU",
+    "Pecinin",
+    "Merlin",
+    "Pandora_M101",
+    "IL-100(Smart)",
+    "Pantera_CLK",
+    "Kingates_Stylo4k",
+    "Monarch",
+    "Aprimatic",
+    "NICE_MHOUSE",
+    "BFT",
+    "Pantera",
+    "KIAV5",
+    "FAAC_SLH",
+    "Alligator_S-275",
+    "NICE_Smilo",
+    "SL_A6-A9/Tomahawk_9010",
+    "Motorline",
+    "KIAV6A",
+    "Tomahawk_TZ-9030",
+    "Cenmax_St-7",
+    "Pantera_XS/Jaguar",
+    "APS-1100_APS-2550",
+    "Reff",
+    "KIAV6B",
+    "Beninca_ARC",
+    "Tomahawk_Z,X_3-5",
+    "Sommer",
+    "Pandora_PRO2",
+    "DoorHan",
+    "EcoStar",
+    "JCM_Tech",
+    "Faraon",
+    "Came_Space",
+    "Magic_4",
+    "SL_A2-A4",
+    "Elmes_Poland",
+    "Normstahl",
+    "KIA",
+    "GSN",
+    "Mutanco_Mutancode",
+    "Cenmax_St-5",
+    "Magic_3",
+    "Partisan_RX",
+    "Steelmate",
+    "Teco",
+    "ZX-730-750-1055",
+    "Jolly_Motors",
+    "Beninca",
+    "Mongoose",
+    "Alligator",
+    "Comunello",
+    "SL_B6,B9_dop",
+    "FAAC_RC,XT",
+    "Genius_Bravo",
+    "Rossi",
+    "DTM_Neo",
+    "Star Line",
+];
+
+const MAGIC: &[u8; 4] = b"KATK";
+const VAG_TAG: &[u8; 4] = b"VAG ";
+const VAG_SIZE: usize = 64;
+const ENTRY_SIZE: usize = 4 + 8; // u32 type + u64 key
+
+/// Parsed result from the embedded blob: (type_id, key) pairs and raw VAG bytes.
+pub struct ParsedKeystore {
+    pub entries: Vec<(u32, u64)>,
+    pub vag_bytes: Vec<u8>,
+}
+
+/// Parse the embedded keystore blob. Returns KIA/Star Line entries and VAG raw bytes.
+///
+/// Keys are stored as 8 bytes **little-endian** per entry; we load with `u64::from_le_bytes`.
+/// The resulting u64 value matches the reference/Pandora hex (e.g. KIA = 0xA8F5DFFC8DAA5CDB),
+/// which is typically written MSB-first in docs; KeeLoq uses this value as a 64-bit key.
+pub fn parse_blob(blob: &[u8]) -> Option<ParsedKeystore> {
+    if blob.len() < 4 || &blob[0..4] != MAGIC {
+        return None;
+    }
+    let n = u16::from_le_bytes(blob[4..6].try_into().ok()?) as usize;
+    let mut off = 6;
+    let mut entries = Vec::with_capacity(n);
+    for _ in 0..n {
+        if off + ENTRY_SIZE > blob.len() {
+            return None;
+        }
+        let ty = u32::from_le_bytes(blob[off..off + 4].try_into().ok()?);
+        let key = u64::from_le_bytes(blob[off + 4..off + 12].try_into().ok()?);
+        entries.push((ty, key));
+        off += ENTRY_SIZE;
+    }
+    if off + 4 + VAG_SIZE > blob.len() || &blob[off..off + 4] != VAG_TAG {
+        return Some(ParsedKeystore {
+            entries,
+            vag_bytes: Vec::new(),
+        });
+    }
+    off += 4;
+    let vag_bytes = blob[off..off + VAG_SIZE].to_vec();
+    Some(ParsedKeystore {
+        entries,
+        vag_bytes,
+    })
+}
+
+/// Return all KeeLoq manufacturer keys from the embedded blob with display names.
+/// Used when an unknown signal is tried as KeeLoq with every key; on success we show "Keeloq (name)".
+/// Only includes entry types that are KeeLoq MF keys (0, 1, 2, 10, 20).
+pub fn keeloq_mf_keys_with_names() -> Vec<(String, u64)> {
+    let blob = embedded_blob();
+    let Some(parsed) = parse_blob(blob) else {
+        return Vec::new();
+    };
+    parsed
+        .entries
+        .iter()
+        .enumerate()
+        .filter(|(_, (ty, _))| KEELOQ_MF_TYPES.contains(ty))
+        .filter_map(|(i, (_, key))| {
+            let name = KEY_ENTRY_NAMES.get(i).copied().unwrap_or("?").to_string();
+            if *key == 0 {
+                None
+            } else {
+                Some((name, *key))
+            }
+        })
+        .chain(
+            user_entries()
+                .iter()
+                .filter(|(_, ty, key)| KEELOQ_MF_TYPES.contains(ty) && *key != 0)
+                .map(|(name, _, key)| (name.clone(), *key)),
+        )
+        .collect()
+}
+
+/// Every keystore entry as `(name, type, key)` in blob order, unfiltered, then the user keystore's. The type is the entry's
+/// learning type as stored (Flipper `KEELOQ_LEARNING_*` numbering, except ProtoPirate's KIA_KEY1..4
+/// entries "KIA"/"KIAV6A"/"KIAV6B"/"KIAV5" = 10..13 and KAT's "Star Line" alias = 20). The KeeLoq
+/// family decoders (keeloq, star_line) walk this list the way the C walks the Flipper keystore.
+pub fn keystore_entries_with_names() -> Vec<(String, u32, u64)> {
+    let Some(parsed) = parse_blob(embedded_blob()) else {
+        return Vec::new();
+    };
+    parsed
+        .entries
+        .iter()
+        .enumerate()
+        .map(|(i, &(ty, key))| {
+            let name = KEY_ENTRY_NAMES.get(i).copied().unwrap_or("?").to_string();
+            (name, ty, key)
+        })
+        .chain(user_entries().iter().cloned())
+        .collect()
+}
+
+/// Return the embedded keystore blob for loading.
+pub fn embedded_blob() -> &'static [u8] {
+    embedded::KEYSTORE_BLOB
+}
+
+/// Return all (type_id, key_u64) from the embedded blob for comparison with external key lists (e.g. Pandora).
+/// Key is stored LE in blob; returned as u64. Format as 16-char hex with format!("{:016X}", key) to match Pandora.
+#[cfg(test)]
+pub fn embedded_entries_for_compare() -> Vec<(u32, u64)> {
+    parse_blob(embedded_blob()).map(|p| p.entries).unwrap_or_default()
+}
+
+#[cfg(test)]
+mod user_keystore_tests {
+    use super::*;
+
+    #[test]
+    fn parses_the_flipper_user_format() {
+        let text = "Filetype: Flipper SubGhz Keystore File\nVersion: 0\nEncryption: 0\n\
+                    0123456789ABCDEF:2:My Gate\n# comment\nAABBCCDDEEFF0011:1:Other:Name\nbad line\n";
+        let (entries, errors) = parse_user_keystore(text).unwrap();
+        assert_eq!(
+            entries,
+            [("My Gate".to_string(), 2, 0x0123_4567_89AB_CDEF), ("Other:Name".to_string(), 1, 0xAABB_CCDD_EEFF_0011)]
+        );
+        assert_eq!(errors, [(7, "bad line".to_string())]);
+        assert!(parse_user_keystore("Encryption: 1\n0123456789ABCDEF:2:X\n").is_err());
+    }
+
+    /// A recovered key is appended in the Flipper format (header written once, no duplicate line) and
+    /// parses back.
+    #[test]
+    fn appends_keys_in_the_flipper_format() {
+        let dir = std::env::temp_dir().join(format!("kat-user-keystore-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let path = append_user_key(&dir, "BF_00D0921", 8, 0xABCD_EF12_3400_0000).unwrap();
+        append_user_key(&dir, "BF_00D0921", 8, 0xABCD_EF12_3400_0000).unwrap();
+        append_user_key(&dir, "BF_0C49A51", 6, 0x6D2A_91C3).unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(
+            text,
+            "Filetype: Flipper SubGhz Keystore File\nVersion: 0\nEncryption: 0\n\
+             ABCDEF1234000000:8:BF_00D0921\n000000006D2A91C3:6:BF_0C49A51\n"
+        );
+        let (entries, errors) = parse_user_keystore(&text).unwrap();
+        assert!(errors.is_empty());
+        assert_eq!(entries[1], ("BF_0C49A51".to_string(), 6, 0x6D2A_91C3));
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Reference dump of the decrypted Flipper SubGhz keystore (standard `KEY:TYPE:NAME` entries and
+    /// the raw 64-byte VAG/AUT64 file). Every entry must be present in the embedded blob with the same
+    /// learning type and key: Kia V3/V4 (KIA), Kia V5 (KIAV5), Kia V6 (KIAV6A/B), Star Line and the
+    /// other alarm KeeLoq keys, Sheriff CFM's ZX-750 key (ZX-730-750-1055) and VAG's AUT64 keys.
+    #[test]
+    fn embedded_keystore_matches_reference_dump() {
+        const DUMP: &[(&str, u32, &str)] = &[
+        ("A8F5DFFC8DAA5CDB", 10, "KIA"),
+        ("638664A880AA23FC", 11, "KIAV6A"),
+        ("6B8E6CA088A22BF4", 12, "KIAV6B"),
+        ("535446524B453030", 13, "KIAV5"),
+        ("EEF3D4B2626C5578", 1, "Alligator"),
+        ("D5A5E7B2A7C1A0BA", 2, "Mongoose"),
+        ("5504045708301203", 1, "SL_A6-A9/Tomahawk_9010"),
+        ("4D41474E64796E65", 1, "Pantera"),
+        ("9BF7F89BF8FE78DA", 1, "SL_A2-A4"),
+        ("AAFBFBA8F7CFEDFC", 1, "Cenmax_St-5"),
+        ("F6E5D4B32ABADCFE", 1, "SL_B6,B9_dop"),
+        ("2587010764070864", 1, "Harpoon"),
+        ("6408076407018725", 1, "Tomahawk_TZ-9030"),
+        ("6F5E4D3B2AABCDEF", 1, "Tomahawk_Z,X_3-5"),
+        ("66B446B980AC752B", 1, "Cenmax_St-7"),
+        ("12332594A9189478", 1, "Sheriff"),
+        ("4130850A82610A14", 1, "Pantera_CLK"),
+        ("1234567890123456", 1, "Cenmax"),
+        ("54365CB7676284F9", 1, "Alligator_S-275"),
+        ("1961DAC2EB198847", 2, "Guard_RF-311A"),
+        ("AD3C12A17028F11E", 1, "Partisan_RX"),
+        ("68732C5056334728", 1, "APS-1100_APS-2550"),
+        ("67732C5056334627", 1, "Pantera_XS/Jaguar"),
+        ("B51526E8F126D1D7", 0, "Teco"),
+        ("1067DC33E7D88A46", 0, "Leopard"),
+        ("8A326438B62287F5", 0, "Faraon"),
+        ("6912FA557DC2418A", 0, "Reff"),
+        ("B51A7AAB27351596", 0, "ZX-730-750-1055"),
+        ];
+        let entries = embedded_entries_for_compare();
+        for &(hex, ty, name) in DUMP {
+            let key = u64::from_str_radix(hex, 16).unwrap();
+            let idx = KEY_ENTRY_NAMES
+                .iter()
+                .position(|n| *n == name)
+                .unwrap_or_else(|| panic!("keystore has no entry named {name}"));
+            assert_eq!(
+                entries.get(idx).copied(),
+                Some((ty, key)),
+                "keystore entry {name} differs from the reference dump"
+            );
+        }
+        const VAG_DUMP: &str = concat!(
+            "01376C86ADABCC43074DE859C12F36AB",
+            "02377C65CEDC42EAA453E861D9B720FC",
+            "038AA37B1E561F8384B619C52E0A3FD7",
+            "00000000000000000000000000000000",
+        );
+        let vag: Vec<u8> = (0..VAG_DUMP.len())
+            .step_by(2)
+            .map(|i| u8::from_str_radix(&VAG_DUMP[i..i + 2], 16).unwrap())
+            .collect();
+        let parsed = parse_blob(embedded_blob()).expect("embedded blob parses");
+        assert_eq!(parsed.vag_bytes, vag, "VAG AUT64 keys differ from the reference dump");
+    }
+
+    /// The JLR key file: a 16-byte key per line (32 hex), spaces/dashes ignored, optional `:name`,
+    /// `#` comments; a short or non-hex line is an error, not a key.
+    #[test]
+    fn parse_jlr_keys_reads_keys_and_flags_bad_lines() {
+        let text = "\
+# my car keys
+0011223344556677 8899AABBCCDDEEFF : XF 2017
+00-11-22-33-44-55-66-77-88-99-aa-bb-cc-dd-ee-ff
+deadbeef
+000102030405060708090a0b0c0d0e0f:zero-ish
+";
+        let (keys, errors) = parse_jlr_keys(text);
+        assert_eq!(keys.len(), 3);
+        assert_eq!(keys[0].0, "XF 2017");
+        assert_eq!(keys[0].1, [0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0x99, 0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF]);
+        assert_eq!(keys[1].0, "key 2", "an unnamed key gets a positional name");
+        assert_eq!(keys[1].1, keys[0].1, "spaces and dashes are ignored");
+        assert_eq!(keys[2].0, "zero-ish");
+        assert_eq!(errors.len(), 1, "`deadbeef` is too short to be a 16-byte key");
+        assert_eq!(errors[0].0, 4, "the 1-based line number");
+    }
+
+    #[test]
+    fn parse_audi_bcm2_keys_reads_cars_and_flags_bad_lines() {
+        let text = "\
+# Audi BCM2 cars
+000102030405060708090A0B0C0D0E0F AABBCCDD 11112222 33334444 : A5 2010
+00-01-02-03-04-05-06-07-08-09-0a-0b-0c-0d-0e-0f, aabbccdd, 11112222
+000102030405060708090A0B0C0D0E0F AABBCCDD
+";
+        let (cars, errors) = parse_audi_bcm2_keys(text);
+        assert_eq!(cars.len(), 2);
+        assert_eq!(cars[0].name, "A5 2010");
+        assert_eq!(cars[0].car_value, [0xAA, 0xBB, 0xCC, 0xDD]);
+        assert_eq!(cars[0].key_ids, vec![[0x11, 0x11, 0x22, 0x22], [0x33, 0x33, 0x44, 0x44]]);
+        assert_eq!(cars[1].name, "car 2", "an unnamed car gets a positional name");
+        assert_eq!(cars[1].key_ids.len(), 1);
+        assert_eq!(errors.len(), 1, "a car needs at least one key ID");
+        assert_eq!(errors[0].0, 4);
+    }
+
+    #[test]
+    fn parse_bmw_cas3_keys_reads_fobs_and_flags_bad_lines() {
+        let text = "\
+# BMW/Mini CAS3 fobs: ID UID KEY48 [COUNTER] [name]
+1234 1A2B3C4D 001122334455 00010234 Mini K1 lock
+5678,AABBCCDD,66778899AABB
+5A5A 12345678 FFEEDDCCBBAA My Fob
+1234 1A2B3C4D 00112233
+";
+        let (fobs, errors) = parse_bmw_cas3_keys(text);
+        assert_eq!(fobs.len(), 3);
+        assert_eq!((fobs[0].id, fobs[0].uid, fobs[0].counter), (0x1234, 0x1A2B_3C4D, 0x0001_0234));
+        assert_eq!(fobs[0].key, [0x00, 0x11, 0x22, 0x33, 0x44, 0x55]);
+        assert_eq!(fobs[0].name, "Mini K1 lock");
+        assert_eq!((fobs[1].id, fobs[1].counter), (0x5678, 0), "no counter → 0");
+        assert_eq!(fobs[1].name, "fob 2", "an unnamed fob gets a positional name");
+        assert_eq!(fobs[2].name, "My Fob", "a non-hex 4th token starts the name");
+        assert_eq!(fobs[2].counter, 0);
+        assert_eq!(errors.len(), 1, "a short key is rejected");
+        assert_eq!(errors[0].0, 5);
+    }
+
+    #[test]
+    fn parse_bmw_cas4_keys_reads_master_and_direct_keys() {
+        let text = "\
+# BMW CAS4 cars (synthetic values)
+0123456789ABCDEF0123456789ABCDEF  demo car
+- 0=000102030405060708090A0B0C0D0E0F 3=0F0E0D0C0B0A09080706050403020100 no master
+AABBCC  bad master
+";
+        let (cars, errors) = parse_bmw_cas4_keys(text);
+        assert_eq!(cars.len(), 2);
+        assert_eq!(cars[0].master.unwrap()[0], 0x01);
+        assert_eq!(cars[0].name, "demo car");
+        assert!(cars[0].keys.is_empty());
+        assert!(cars[1].master.is_none(), "- means no master");
+        assert_eq!(cars[1].keys.len(), 2);
+        assert_eq!((cars[1].keys[0].num, cars[1].keys[1].num), (0, 3));
+        assert_eq!(cars[1].name, "no master");
+        assert_eq!(errors.len(), 1, "a short master with no direct keys is rejected");
+        assert_eq!(errors[0].0, 4);
+    }
+
+    #[test]
+    fn parse_psa_bsi_key_reads_the_table_and_ignores_the_rest() {
+        let text = "\
+# PSA older-code BSI key
+00-01-02-03-04-05-06-07 08 09 0a 0b 0c 0d 0e 0f
+deadbeef
+";
+        let (table, errors) = parse_psa_bsi_key(text);
+        assert_eq!(table, Some([0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]), "spaces and dashes are ignored");
+        assert_eq!(errors, vec![3], "`deadbeef` is not 16 bytes");
+        assert_eq!(parse_psa_bsi_key("# nothing here\n").0, None, "no table without a 32-hex line");
+    }
+
+    #[test]
+    fn psa_table_for_uses_the_builtin_table_and_a_file_overrides_it() {
+        // No file: KAT's shipped table ([`PSA_BSI_TABLE`]) is used.
+        assert_eq!(psa_table_for(None), (PSA_BSI_TABLE, vec![]));
+        // A file with a valid table overrides the built-in one (a made-up table, not the real one).
+        let dummy = [0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0x99, 0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF, 0x00];
+        let (t, errs) = psa_table_for(Some("11223344 55667788 99aabbcc ddeeff00"));
+        assert_eq!((t, errs), (dummy, vec![]), "a valid file table overrides the built-in");
+        // A file with no valid table keeps the built-in table (and reports the bad line).
+        assert_eq!(psa_table_for(Some("not a key\n")), (PSA_BSI_TABLE, vec![1]));
+    }
+
+    #[test]
+    fn dump_keystore_keys_for_pandora_compare() {
+        let entries = embedded_entries_for_compare();
+        eprintln!("KAT embedded keystore keys (type, hex, name):");
+        for (i, (ty, key)) in entries.iter().enumerate() {
+            let name = KEY_ENTRY_NAMES.get(i).copied().unwrap_or("?");
+            eprintln!("  type {}  {:016X}  {}", ty, key, name);
+        }
+    }
+}

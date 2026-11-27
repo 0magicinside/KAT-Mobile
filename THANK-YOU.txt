@@ -1,0 +1,6 @@
+Thank you again, Kara, for your support and encouragement!
+We got the Android app working, and this English edition now uses the
+KAT 1.29.0 receive core. I am happy to share the source with you.
+
+Best regards,
+CooKie

@@ -1,0 +1,10 @@
+[target.aarch64-linux-android]
+linker = "../.tools/android-ndk-r27c/toolchains/llvm/prebuilt/windows-x86_64/bin/clang.exe"
+rustflags = ["-C", "link-arg=--target=aarch64-linux-android26", "-C", "link-arg=-Wl,-z,max-page-size=16384", "-C", "link-arg=-Wl,-z,common-page-size=16384"]
+
+[target.i686-linux-android]
+linker = "../.tools/android-ndk-r27c/toolchains/llvm/prebuilt/windows-x86_64/bin/clang.exe"
+rustflags = ["-C", "link-arg=--target=i686-linux-android26", "-C", "link-arg=-Wl,-z,max-page-size=16384", "-C", "link-arg=-Wl,-z,common-page-size=16384"]
+
+[target.x86_64-pc-windows-gnu]
+linker = "C:/msys64/ucrt64/bin/gcc.exe"

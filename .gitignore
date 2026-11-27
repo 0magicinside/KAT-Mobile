@@ -1,0 +1,8 @@
+.gradle/
+.kotlin/
+.tools/
+build/
+app/build/
+native/target/
+local.properties
+*.log

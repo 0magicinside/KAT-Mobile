@@ -1,0 +1,26 @@
+[package]
+name = "kat-mobile-rx-core"
+version = "1.29.0"
+edition = "2021"
+license = "BSD-3-Clause"
+autobins = false
+
+[lib]
+name = "kat_rx"
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+jni = "0.21.1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+chrono = { version = "0.4", features = ["serde"] }
+tracing = "0.1"
+num-complex = "0.4"
+anyhow = "1"
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+strip = "symbols"
+

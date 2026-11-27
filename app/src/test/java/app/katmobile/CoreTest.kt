@@ -1,0 +1,88 @@
+package app.katmobile
+
+import org.junit.Assert.*
+import org.junit.Test
+import java.nio.ByteBuffer
+import java.nio.ByteOrder
+import kotlin.math.*
+
+class CoreTest {
+    @Test fun independentHopTimerRotatesWithNoIqAndDoesNotAddCallbackTimeToDwell()=kotlinx.coroutines.runBlocking{
+        var now=0L
+        val seen=mutableListOf<Pair<Long,Long>>()
+        val schedule=HopSchedule(listOf(315000000L,433920000L,868350000L),1000,now)
+        try{
+            runHopTimer(schedule,clock={now},wait={now+=it}){hop->
+                seen+=now to hop.frequency
+                if(seen.size==4)throw kotlinx.coroutines.CancellationException("test complete")
+                now+=150 // Simulated tune/decoder work must not add 150 ms to each dwell.
+            }
+        }catch(_:kotlinx.coroutines.CancellationException){}
+        assertEquals(listOf(1000L,2000L,3000L,4000L),seen.map{it.first})
+        assertEquals(listOf(433920000L,868350000L,315000000L,433920000L),seen.map{it.second})
+    }
+
+    @Test fun hoppingFollowsDwellAndWrapsWithoutSignalGate(){
+        val hop=HopSchedule(listOf(315000000L,433920000L,868350000L),1000,500)
+        assertEquals(315000000L,hop.frequency)
+        assertFalse(hop.advance(1499));assertTrue(hop.advance(1500));assertEquals(433920000L,hop.frequency)
+        assertFalse(hop.advance(1500));assertTrue(hop.advance(2500));assertEquals(868350000L,hop.frequency)
+        assertTrue(hop.advance(3500));assertEquals(315000000L,hop.frequency);assertEquals(3L,hop.switches)
+        // A delayed USB callback advances one actual tune, without fake missed hops.
+        assertTrue(hop.advance(10000));assertEquals(433920000L,hop.frequency);assertEquals(4L,hop.switches)
+    }
+
+    @Test fun desktopOffsetTuningAndIqNamesAgree(){
+        assertEquals(433_670_000,Wire.liveCenter(433_920_000,2_000_000))
+        val spec=StateFormat.iqSpec("kat_433670000Hz_2000000sps_rx433920000Hz_1794365554491.cs8",RadioSettings(sampleRate=4_000_000))
+        assertEquals(2_000_000,spec.rate);assertEquals(433_670_000,spec.center);assertEquals(433_920_000,spec.target);assertEquals(250000.0,spec.offsetHz,0.0)
+        val old=StateFormat.iqSpec("kat_433920000Hz_2000000sps_old.cs8",RadioSettings());assertEquals(0.0,old.offsetHz,0.0)
+    }
+    @Test fun fobV2PreservesEveryPulseAndUsesDesktopSignalObject(){
+        val pulses=(0 until 170).map{Pulse(it%2==1,200+it*3)}
+        val c=Capture(time=1794365015752,frequency=868350000,modulation="FM",protocol="Synthetic test",pulses=pulses)
+        val text=StateFormat.fob(c);val root=com.google.gson.JsonParser.parseString(text).asJsonObject
+        assertEquals("kat-fob",root["format"].asString);assertEquals("2.0",root["version"].asString)
+        assertEquals(170,root["capture"].asJsonObject["raw_pair_count"].asInt)
+        val imported=StateFormat.importFob(text);assertEquals(c.time,imported.time);assertEquals(c.frequency,imported.frequency);assertEquals(c.protocol,imported.protocol);assertEquals("FM",imported.modulation);assertEquals(pulses,imported.pulses)
+        java.io.File("build/interop-tests").mkdirs();java.io.File("build/interop-tests/export.fob").writeText(text)
+        val sub=StateFormat.rawSub(c.copy(modulation="AM"));val restored=StateFormat.importRawSub(sub);assertEquals(pulses,restored.pulses)
+    }
+    @Test fun frequencyPacketUsesMhzAndRemainderWithout32BitOverflow(){
+        val request=Wire.frequency(5_800_125_000);val b=ByteBuffer.wrap(request.data).order(ByteOrder.LITTLE_ENDIAN)
+        assertEquals(16,request.request);assertFalse(request.input);assertEquals(5800,b.int);assertEquals(125000,b.int)
+    }
+    @Test fun sampleRatePacketIncludesDivider(){val r=Wire.configuration(RadioSettings()).first{it.request==6};val b=ByteBuffer.wrap(r.data).order(ByteOrder.LITTLE_ENDIAN);assertEquals(2_000_000,b.int);assertEquals(1,b.int)}
+    @Test fun gainsUseInboundAcknowledgmentAndIndex(){val plan=Wire.configuration(RadioSettings(lna=40,vga=62));assertTrue(plan.first{it.request==19}.input);assertEquals(40,plan.first{it.request==19}.index);assertEquals(62,plan.first{it.request==20}.index)}
+    @Test fun configurationContainsNoTransmitOrFirmwareWrites(){val plan=Wire.configuration(RadioSettings());assertFalse(plan.any{it.request in listOf(10,11,21)||it.request==1&&it.value==2});assertEquals(0,plan.first{it.request==1}.value)}
+    @Test fun invalidHardwareSettingsAreRejected(){listOf(RadioSettings(lna=9),RadioSettings(vga=63),RadioSettings(sampleRate=1),RadioSettings(frequency=0),RadioSettings(bandwidth=20_000_000),RadioSettings(hopDwellMs=1)).forEach{assertTrue(runCatching{it.validate()}.isFailure)}}
+    @Test fun frequencyInputIsExactAndBounded(){assertEquals(433_920_000,RadioSettings.mhz("433.92"));assertEquals(6_000_000_000,RadioSettings.mhz("6000"));assertTrue(runCatching{RadioSettings.mhz("6000.1")}.isFailure)}
+    @Test fun fftFindsSyntheticCarrierAtExpectedOffset(){val n=1024;val bytes=ByteArray(n*2);repeat(n){val phase=2*PI*32*it/n;bytes[it*2]=(cos(phase)*100).toInt().toByte();bytes[it*2+1]=(sin(phase)*100).toInt().toByte()};val bins=Spectrum.fft(bytes);assertEquals(256,bins.size);assertTrue(abs(bins.indices.maxBy{bins[it]}-136)<=1);assertTrue(bins.max()>-10f)}
+    @Test fun zeroInputHasNoInventedSignal(){val captures=mutableListOf<Capture>();val engine=SignalEngine(RadioSettings(),captures::add);repeat(10){engine.process(ByteArray(16384))};engine.flush();assertTrue(captures.isEmpty());assertTrue(engine.powerDb<=-80)}
+    @Test fun amBurstHasRealPulseDurationsAcrossUsbChunks(){
+        val captures=mutableListOf<Capture>();val engine=SignalEngine(RadioSettings(),captures::add)
+        val raw=java.io.ByteArrayOutputStream()
+        repeat(16){repeat(800){raw.write(100);raw.write(0)};repeat(800){raw.write(0);raw.write(0)}}
+        repeat(50000){raw.write(0);raw.write(0)}
+        raw.toByteArray().toList().chunked(16384).forEach{engine.process(it.toByteArray())};engine.flush()
+        assertEquals(1,captures.size);assertTrue(captures.single().pulses.size>=30)
+        assertTrue(captures.single().pulses.filter{it.level}.all{abs(it.duration_us-400)<=8})
+    }
+    @Test fun rawSubRoundTripPreservesPulseLevels(){val c=Capture(pulses=listOf(Pulse(true,400),Pulse(false,800),Pulse(true,200)));val result=StateFormat.importRawSub(StateFormat.rawSub(c));assertEquals(c.frequency,result.frequency);assertEquals(c.pulses,result.pulses)}
+    @Test fun fmDiscriminatorExtractsSyntheticFskTimings(){
+        val captures=mutableListOf<Capture>();val engine=SignalEngine(RadioSettings(modulation="FM"),captures::add)
+        val raw=java.io.ByteArrayOutputStream();var phase=0.0
+        repeat(20){bit->repeat(800){phase+=(if(bit%2==0)1 else -1)*2*PI*30000/2_000_000;raw.write((cos(phase)*100).toInt().toByte().toInt());raw.write((sin(phase)*100).toInt().toByte().toInt())}}
+        repeat(50000){raw.write(0);raw.write(0)}
+        raw.toByteArray().toList().chunked(16384).forEach{engine.process(it.toByteArray())};engine.flush()
+        assertEquals(1,captures.size);assertEquals("FM",captures.single().modulation)
+        assertTrue(captures.single().pulses.size>=18)
+        assertTrue(captures.single().pulses.take(18).all{abs(it.duration_us-400)<=16})
+    }
+    @Test fun rawImporterRejectsNonRawAndAbsurdPulse(){assertTrue(runCatching{StateFormat.importRawSub("Frequency: 433920000\nProtocol: KeeLoq\nRAW_Data: 100 -100")}.isFailure);assertTrue(runCatching{StateFormat.importRawSub("Frequency: 433920000\nProtocol: RAW\nRAW_Data: 999999999999 -100")}.isFailure)}
+    @Test fun fobImportDoesNotRecomputeSavedCounterFromHistoricalPulses(){val text="""{"protocol":"Imported","frequency":433920000,"serial":42,"counter":171,"raw_pairs":[{"level":true,"duration_us":400},{"level":false,"duration_us":800}]}""";val c=StateFormat.importFob(text);assertEquals("171",c.counter);assertEquals(text,c.metadata);assertEquals("171",StateFormat.importFob(StateFormat.captureJson(c,true)).counter)}
+    @Test fun jsonExportCanExcludeRawWithoutChangingMetadata(){val c=StateFormat.importFob("""{"counter":171,"raw_pairs":[{"level":true,"duration_us":400}]}""");val exported=StateFormat.captureJson(c,false);assertFalse(exported.contains("raw_pairs"));assertEquals("171",StateFormat.importFob(exported).counter);assertEquals(1,c.pulses.size)}
+    @Test fun mobileCaptureJsonReimportsPulses(){val c=Capture(pulses=listOf(Pulse(true,20),Pulse(false,40)));assertEquals(c.pulses,StateFormat.importFob(StateFormat.captureJson(c,true)).pulses)}
+    @Test fun sessionMigrationRetainsDefaultSettings(){val state=StateFormat.decode("""{"settings":{"frequency":315000000},"captures":[]}""");assertEquals(315_000_000,state.settings.frequency);assertEquals(32,state.settings.lna);assertTrue(state.settings.autosave)}
+    @Test fun iniImportOnlyAppliesReceptionAndHistoryPreferences(){val s=StateFormat.ini("[radio]\ndefault_frequency=315000000\ndefault_lna_gain=40\ndefault_vga_gain=40\n[general]\nmax_captures=0\nignore_duplicates=false\nautobf=true",RadioSettings());assertEquals(315_000_000,s.frequency);assertEquals(40,s.lna);assertEquals(2000,s.maxCaptures);assertFalse(s.ignoreDuplicates)}
+}
