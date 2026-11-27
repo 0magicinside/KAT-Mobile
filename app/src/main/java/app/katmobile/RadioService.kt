@@ -42,7 +42,7 @@ class RadioService:Service() {
         val stop=PendingIntent.getService(this,1,Intent(this,RadioService::class.java).setAction("STOP"),PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT)
         return Notification.Builder(this,"radio").setSmallIcon(R.drawable.ic_radio).setContentTitle("KAT Mobile · RX")
             .setContentText("${"%.3f".format(Hub.status.value.frequency/1e6)} MHz · USB reception")
-            .setContentIntent(open).setOngoing(true).addAction(Notification.Action.Builder(null,"Zaustavi",stop).build()).build()
+            .setContentIntent(open).setOngoing(true).addAction(Notification.Action.Builder(null,"Stop",stop).build()).build()
     }
     private fun startReceiver(name:String){
         val manager=getSystemService(UsbManager::class.java)
