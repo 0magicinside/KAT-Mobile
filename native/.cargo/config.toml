@@ -1,10 +1,12 @@
+# Link arguments for the Android targets. The linker itself (the NDK's clang) comes from the Gradle
+# build, which sets CARGO_TARGET_<TARGET>_LINKER from the Android SDK's NDK (app/build.gradle.kts).
+# 16 KB page alignment: Android 15 devices can use 16 KB memory pages.
 [target.aarch64-linux-android]
-linker = "../.tools/android-ndk-r27c/toolchains/llvm/prebuilt/windows-x86_64/bin/clang.exe"
 rustflags = ["-C", "link-arg=--target=aarch64-linux-android26", "-C", "link-arg=-Wl,-z,max-page-size=16384", "-C", "link-arg=-Wl,-z,common-page-size=16384"]
 
-[target.i686-linux-android]
-linker = "../.tools/android-ndk-r27c/toolchains/llvm/prebuilt/windows-x86_64/bin/clang.exe"
-rustflags = ["-C", "link-arg=--target=i686-linux-android26", "-C", "link-arg=-Wl,-z,max-page-size=16384", "-C", "link-arg=-Wl,-z,common-page-size=16384"]
+[target.x86_64-linux-android]
+rustflags = ["-C", "link-arg=--target=x86_64-linux-android26", "-C", "link-arg=-Wl,-z,max-page-size=16384", "-C", "link-arg=-Wl,-z,common-page-size=16384"]
 
+# Host tests on Windows with MSYS2's UCRT64 GCC.
 [target.x86_64-pc-windows-gnu]
 linker = "C:/msys64/ucrt64/bin/gcc.exe"

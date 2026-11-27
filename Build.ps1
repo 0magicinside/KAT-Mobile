@@ -15,9 +15,9 @@ if(!(Test-Path -LiteralPath "$taskSdk/platform-tools/adb.exe")){throw "Android S
 $taskCargo=Join-Path $env:USERPROFILE ".cargo/bin/cargo.exe"
 if(!(Test-Path -LiteralPath $taskCargo)){throw "Install Rust using rustup (cargo is missing)."}
 $env:CARGO=$taskCargo
-if(!(Test-Path -LiteralPath "$projectRoot/.tools/android-ndk-r27c/toolchains/llvm/prebuilt/windows-x86_64/bin/clang.exe")){throw "NDK r27c is missing from the .tools directory."}
+if(!(Test-Path -LiteralPath "$taskSdk/ndk/27.2.12479018/toolchains/llvm/prebuilt/windows-x86_64/bin/clang.exe") -and !$env:ANDROID_NDK_HOME){throw "Android NDK 27.2.12479018 is missing. Install it with the SDK Manager (SDK Tools, NDK, Show Package Details) or set ANDROID_NDK_HOME."}
 $taskTargets=& (Join-Path $env:USERPROFILE ".cargo/bin/rustup.exe") target list --installed
-foreach($taskTarget in @("aarch64-linux-android","i686-linux-android")){
+foreach($taskTarget in @("aarch64-linux-android","x86_64-linux-android")){
     if($taskTargets -notcontains $taskTarget){throw "Missing Rust target $taskTarget. Run: rustup target add $taskTarget"}
 }
 $taskList=@(":app:testDebugUnitTest",":app:lintDebug",":app:assembleRelease")
@@ -43,16 +43,16 @@ if($Install -or $DeviceTests){
         & $taskAdb -s $Serial install -r "$projectRoot/app/build/outputs/apk/androidTest/debug/app-debug-androidTest.apk"
         if($LASTEXITCODE -ne 0){throw 'Test installation failed.'}
         $deviceApi=[int](& $taskAdb -s $Serial shell getprop ro.build.version.sdk)
-        if($deviceApi -ge 33){& $taskAdb -s $Serial shell pm grant app.katmobile.qa android.permission.POST_NOTIFICATIONS}
-        $taskTestOutput=& $taskAdb -s $Serial shell am instrument -w -e class app.katmobile.AppTest app.katmobile.qa.test/androidx.test.runner.AndroidJUnitRunner
-        $taskTestOutput | Tee-Object -FilePath "$projectRoot/dist/DEVICE-TESTOVI.txt"
+        if($deviceApi -ge 33){& $taskAdb -s $Serial shell pm grant io.karazajac.katmobile.qa android.permission.POST_NOTIFICATIONS}
+        $taskTestOutput=& $taskAdb -s $Serial shell am instrument -w -e class app.katmobile.AppTest io.karazajac.katmobile.qa.test/androidx.test.runner.AndroidJUnitRunner
+        $taskTestOutput | Tee-Object -FilePath "$projectRoot/dist/DEVICE-TESTS.txt"
         if(($taskTestOutput -join "`n") -notmatch 'OK \(\d+ tests\)'){throw 'Device tests failed.'}
     }
     if($Install){
         & $taskAdb -s $Serial install -r "$projectRoot/dist/KAT-Mobile-RX.apk"
         if($LASTEXITCODE -ne 0){throw 'Release APK installation failed.'}
-        & $taskAdb -s $Serial shell am start -n app.katmobile/.MainActivity
+        & $taskAdb -s $Serial shell am start -n io.karazajac.katmobile/app.katmobile.MainActivity
     }
 }
 Write-Host "Ready: $projectRoot/dist/KAT-Mobile-RX.apk" -ForegroundColor Green
-Write-Host "Build instructions: $projectRoot/BUILD.txt"
+Write-Host "Build instructions: $projectRoot/README.md"

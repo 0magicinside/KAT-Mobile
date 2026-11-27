@@ -8,6 +8,10 @@ autobins = false
 [lib]
 name = "kat_rx"
 crate-type = ["cdylib", "rlib"]
+# The unit tests inside src/ are KAT's own and need modules this receive core leaves out (export,
+# TX, key recovery); they run in KAT's CI. This crate's tests are in tests/.
+test = false
+doctest = false
 
 [dependencies]
 jni = "0.21.1"

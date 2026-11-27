@@ -4,5 +4,7 @@
 build/
 app/build/
 native/target/
+native/catalog.json
+dist/
 local.properties
 *.log
