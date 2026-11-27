@@ -5,13 +5,25 @@ import java.nio.ByteBuffer
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicLong
 
+/**
+ * What the embedded RTL-SDR Rust driver asks of the dongle: native/src/mobile_rtlsdr.rs calls these
+ * two methods by name and signature over JNI. [RtlControlBridge] is the dongle; the device tests
+ * stand a simulated one in its place.
+ */
+internal interface RtlUsbControl {
+    /** A USB control transfer, as `UsbDeviceConnection.controlTransfer`: bytes moved, or negative. */
+    fun controlTransfer(requestType:Int,request:Int,value:Int,index:Int,data:ByteArray,length:Int,timeoutMs:Int):Int
+    /** Claim the interface again (librtlsdr resets the dongle when its first write fails). */
+    fun resetInterface():Boolean
+}
+
 /** Control transfer callback invoked by the embedded MPL-2.0 RTL-SDR Rust driver over JNI. */
 internal class RtlControlBridge(
     private val connection:UsbDeviceConnection,
     private val iface:UsbInterface
-) {
+):RtlUsbControl {
     /** Called from native/src/mobile_rtlsdr.rs; never throws across JNI. */
-    fun controlTransfer(
+    override fun controlTransfer(
         requestType:Int,
         request:Int,
         value:Int,
@@ -26,7 +38,7 @@ internal class RtlControlBridge(
     }
 
     /** Soft interface re-claim used if the initial dummy write stalls. */
-    fun resetInterface():Boolean = try {
+    override fun resetInterface():Boolean = try {
         connection.releaseInterface(iface)
         connection.claimInterface(iface,true)
     } catch (_:Exception) {
@@ -36,7 +48,7 @@ internal class RtlControlBridge(
 
 /** JNI bindings to native/src/mobile_rtlsdr.rs (RTL2832U + R820T/R820T2/R828D, incl. RTL-SDR Blog V3/V4). */
 internal object NativeRtlSdr {
-    fun open(bridge:RtlControlBridge,manufacturer:String,product:String,serial:String):Long {
+    fun open(bridge:RtlUsbControl,manufacturer:String,product:String,serial:String):Long {
         check(NativeDecoder.available){"The native KAT RTL-SDR driver is unavailable"}
         return nativeOpen(bridge,manufacturer,product,serial)
     }

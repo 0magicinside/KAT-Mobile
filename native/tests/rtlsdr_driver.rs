@@ -83,10 +83,9 @@ impl UsbTransport for MockRtlDongle {
                 *b = self.eeprom_byte7;
             }
         } else if block == BLOCK_IIC && Some(value) == self.tuner_i2c_addr {
-            // R82xx I2C reads return bit-reversed bytes.
-            // Reg 0x00 check value is 0x69 (bit-reverse of 0x69 is 0x96; Wait: i2c_read_reg reads raw 0x69!).
-            // For R82xx::read_reg, PLL lock is checked via data[2] & 0x40 after bit-reverse:
-            // bit_reverse(0x02) == 0x40.
+            // The tuner probe (`i2c_read_reg`: one byte from register 0) reads the raw 0x69 an
+            // R82xx answers with. R82xx::read_reg bit-reverses what it reads and checks the PLL
+            // lock as data[2] & 0x40: bit_reverse(0x02) == 0x40, so every other read says locked.
             let reg = *self.last_i2c_reg.lock().unwrap();
             if buf.len() == 1 && reg == 0x00 {
                 // Tuner probe (`i2c_read_reg`) expects 0x69 without bit-reversal.

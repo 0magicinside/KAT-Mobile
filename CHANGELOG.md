@@ -2,7 +2,19 @@
 
 All notable changes to KAT Mobile are documented here.
 
-## [1.30.0] - 2026-11-26
+## [Unreleased]
+
+### Added
+
+- **RTL-SDR over USB OTG** (receive only), contributed by @0magicinside (#1): RTL2832U dongles
+  with an R820T, R820T2 or R828D tuner (RTL-SDR Blog V3 and V4 among them), through Android's USB
+  host API with no root and no driver app. The dongle is set up by desktop KAT's RTL-SDR driver
+  (its `rtl-sdr-rs`, MPL-2.0, in `native/src/rtlsdr/`), which talks to it through the app's USB
+  connection, and its samples (CU8) go through the same receive pipeline as the HackRF's. Sample
+  rate (1.024, 2.0, 2.048 or 2.4 MS/s), auto or manual tuner gain, PPM correction and the bias-tee
+  are in Settings; hopping and IQ recording (`.cu8`) work as with the HackRF. With two radios
+  attached, Start RX asks which one. Transmitting still needs a HackRF. The driver's PPM correction
+  now reaches the tuner too, as librtlsdr's does. Not yet tested with a real dongle.
 
 KAT Mobile transmits, as KAT does, and its version now follows KAT's: its core is KAT 1.30.0's.
 

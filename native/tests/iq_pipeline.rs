@@ -77,6 +77,49 @@ fn princeton_iq(offset:f64,noise:f64)->Vec<u8>{
     assert!(bursts.iter().any(|b|b.modulation=="AM"&&(b.offset_hz+25_000.0).abs()<2000.0&&kat_rx::identify_receive(&b.pulses,433_920_000,false).unwrap().iter().any(|r|r.name=="Princeton")));
 }
 
+/// princeton_iq as an RTL-SDR delivers it: CU8 (centred on 127.5) at `rate`, the carrier `offset` Hz
+/// from the LO.
+fn princeton_cu8(rate:u32,offset:f64,noise:f64)->Vec<u8>{
+    let mut raw=Vec::new();let mut sample=0u64;let mut t_us=0u64;let mut rng=0x5eed_1234u32;
+    let mut segment=|us:u64,on:bool|{
+        t_us+=us;let end=t_us*rate as u64/1_000_000;
+        while sample<end{
+            let phase=TAU*offset*sample as f64/rate as f64;sample+=1;
+            for tone in [phase.cos(),phase.sin()]{
+                rng=rng.wrapping_mul(1664525).wrapping_add(1013904223);
+                let n=((rng>>8) as f64/16_777_216.0-0.5)*2.0*noise;
+                raw.push((127.5+n+if on{tone*65.0}else{0.0}).round().clamp(0.0,255.0) as u8);
+            }
+        }
+    };
+    segment(30000,false);
+    for _ in 0..4{
+        for c in "101001011001011010010110".chars(){segment(if c=='1'{1170}else{390},true);segment(if c=='1'{390}else{1170},false);}
+        segment(390,true);segment(11700,false);
+    }
+    segment(100000,false);raw
+}
+
+/// Every sample rate the app offers for an RTL-SDR, with the LO where the app tunes it (the target
+/// rate/8 above it, Wire.liveCenter) and the remote's carrier 12 kHz off: recognised, its timing kept.
+#[test]fn cu8_at_every_rtl_sdr_sample_rate_decodes_princeton(){
+    for rate in [1_024_000u32,2_000_000,2_048_000,2_400_000]{
+        let target_offset=(rate/8) as f64;
+        let raw=princeton_cu8(rate,target_offset+12_000.0,6.0);
+        let mut rx=ReceiveSession::with_format(rate,433_920_000,target_offset,kat_rx::IqFormat::Cu8);
+        let mut bursts=Vec::new();
+        for c in raw.chunks(16384){bursts.extend(rx.process(c).bursts)}
+        bursts.extend(rx.flush().bursts);
+        let b=bursts.iter().filter(|b|b.modulation=="AM")
+            .find(|b|kat_rx::identify_receive(&b.pulses,433_920_000,false).unwrap().iter().any(|r|r.name=="Princeton"))
+            .unwrap_or_else(||panic!("Princeton not recognised at {rate} S/s; {} bursts",bursts.len()));
+        let highs:Vec<i32>=b.pulses.iter().copied().filter(|d|*d>0).collect();
+        assert!(highs.len()>=24,"{rate} S/s: {highs:?}");
+        assert!(highs.iter().filter(|d|(**d-390).abs()<=24||(**d-1170).abs()<=24).count()*100/highs.len()>=95,"Timing distorted at {rate} S/s: {highs:?}");
+        assert!((b.offset_hz-12_000.0).abs()<2_000.0,"Carrier offset at {rate} S/s: {} Hz",b.offset_hz);
+    }
+}
+
 #[test]fn cu8_rtlsdr_fsk_slicer_tracks_both_tones(){
     let mut cu8=Vec::new();let mut phase:f64=0.0;let mut rng=29u32;
     for n in 0..300000usize{

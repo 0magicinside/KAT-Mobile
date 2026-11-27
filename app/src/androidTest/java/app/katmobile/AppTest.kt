@@ -276,4 +276,81 @@ class AppTest {
         assertNotNull("No CU8 Princeton decoded: ${captures.map{it.protocol}}",recognized)
         assertEquals("RTL-SDR",recognized!!.source)
     }
+    /** The RTL-SDR driver (Rust) through the JNI bridge it uses on a phone, against a simulated R820T dongle; this debuggable app runs with CheckJNI. */
+    @Test fun rtlSdrDriverRunsOverJniAgainstASimulatedR820t(){
+        val dongle=FakeRtlDongle(tuner=0x34)
+        val h=NativeRtlSdr.open(dongle,"Realtek","RTL2838UHIDIR","00000001")
+        assertNotEquals(0L,h)
+        try{
+            assertEquals("Rafael Micro R820T",NativeRtlSdr.tunerName(h))
+            assertEquals("Settings offer the driver's gains",RtlSdrUsb.R82XX_GAINS_TENTHS_DB,NativeRtlSdr.tunerGains(h).toList())
+            dongle.ops.clear()
+            NativeRtlSdr.configure(h,433_670_000,2_000_000,false,402,-12,false)
+            assertTrue("No RX buffer reset",dongle.ops.any{!it.input&&it.block==1&&it.value==0x2148&&it.data==listOf<Byte>(0x10,0x02)})
+            assertEquals("Bias-tee (GPIO 0) on",0,dongle.gpo and 1)
+            NativeRtlSdr.setCenterFreq(h,314_750_000)
+            NativeRtlSdr.resetBuffer(h)
+            val outOfRange=runCatching{NativeRtlSdr.setCenterFreq(h,10_000_000)}.exceptionOrNull()
+            assertTrue("$outOfRange",outOfRange is IllegalStateException&&outOfRange.message.orEmpty().contains("outside the RTL-SDR tuner range"))
+            NativeRtlSdr.configure(h,433_670_000,2_400_000,true,0,0,true)
+            assertEquals("Bias-tee (GPIO 0) off",1,dongle.gpo and 1)
+        }finally{NativeRtlSdr.close(h)}
+        assertEquals("Bias-tee left on after close",0,dongle.gpo and 1)
+        assertEquals("Demodulator not powered down",listOf<Byte>(0x20),dongle.lastWrite(2,0x3000))
+        assertTrue(runCatching{NativeRtlSdr.tunerName(h)}.exceptionOrNull() is IllegalStateException)
+        NativeRtlSdr.close(h)
+    }
+    @Test fun rtlSdrBlogV4IsRecognizedOverJniAndTunesHf(){
+        val dongle=FakeRtlDongle(tuner=0x74)
+        val h=NativeRtlSdr.open(dongle,"RTLSDRBlog","Blog V4","00000001")
+        try{
+            assertEquals("Rafael Micro R828D (Blog V4)",NativeRtlSdr.tunerName(h))
+            NativeRtlSdr.configure(h,433_670_000,2_000_000,true,402,0,false)
+            NativeRtlSdr.setCenterFreq(h,10_000_000)
+        }finally{NativeRtlSdr.close(h)}
+    }
+    /** A dongle that does not answer, or whose USB callback throws, fails the open with an error; the app goes on. */
+    @Test fun rtlSdrOpenFailuresAreErrorsNotCrashes(){
+        fun openError(d:FakeRtlDongle)=runCatching{NativeRtlSdr.open(d,"Realtek","RTL2838UHIDIR","")}.exceptionOrNull()
+        val noTuner=openError(FakeRtlDongle(tuner=null))
+        assertTrue("$noTuner",noTuner is IllegalStateException&&noTuner.message.orEmpty().contains("No supported tuner"))
+        val silent=openError(FakeRtlDongle(tuner=0x34,fail=true))
+        assertTrue("$silent",silent is IllegalStateException&&silent.message.orEmpty().contains("USB control"))
+        val throwing=openError(FakeRtlDongle(tuner=0x34,throws=true))
+        assertTrue("$throwing",throwing is IllegalStateException&&throwing.message.orEmpty().contains("JNI USB control"))
+        val h=NativeRtlSdr.open(FakeRtlDongle(tuner=0x34),"Realtek","RTL2838UHIDIR","")
+        NativeRtlSdr.close(h)
+    }
+}
+
+/**
+ * An RTL2832U as the RTL-SDR driver sees it over JNI (the model native/tests/rtlsdr_driver.rs uses):
+ * its registers read 0 and take any write, GPO keeps what was written, the EEPROM forces neither
+ * bias-tee nor direct sampling, and the tuner at I2C address [tuner] (0x34 R820T, 0x74 R828D)
+ * answers the probe with 0x69 and reports its PLL locked. Nothing else on the I2C bus answers.
+ */
+private class FakeRtlDongle(val tuner:Int?,val fail:Boolean=false,val throws:Boolean=false):RtlUsbControl{
+    data class Op(val input:Boolean,val block:Int,val value:Int,val data:List<Byte>)
+    val ops:MutableList<Op> = java.util.Collections.synchronizedList(mutableListOf())
+    @Volatile var gpo=0
+    private var tunerRegister=-1
+    override fun controlTransfer(requestType:Int,request:Int,value:Int,index:Int,data:ByteArray,length:Int,timeoutMs:Int):Int{
+        if(throws)throw IllegalStateException("USB device detached")
+        if(fail)return -1
+        assertEquals(0,request);assertTrue(length in 0..data.size);assertTrue(timeoutMs>0)
+        val input=requestType==0xC0
+        assertTrue("Request type $requestType",input||requestType==0x40)
+        val block=index shr 8
+        when{
+            block==6&&value==0xA0->{assertTrue("EEPROM writes only set the read address",input||length==1);if(input)data.fill(0x16,0,length)}
+            block==6&&value==tuner->if(input)data.fill((if(length==1&&tunerRegister==0)0x69 else 0x02).toByte(),0,length) else if(length>0)tunerRegister=data[0].toInt() and 255
+            block==6->return -1
+            block==2&&value==0x3001->if(input)data[0]=gpo.toByte() else gpo=data[0].toInt() and 255
+            input->data.fill(0,0,length)
+        }
+        ops.add(Op(input,block,value,data.take(length)))
+        return length
+    }
+    override fun resetInterface()=!fail
+    fun lastWrite(block:Int,value:Int)=ops.lastOrNull{!it.input&&it.block==block&&it.value==value}?.data
 }
